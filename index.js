@@ -103,16 +103,67 @@
         return changed;
     }
 
+    function isInSet(s, k) {
+        return !!s.sets[k] || nonLeaderMembers(s).has(k);
+    }
+
+    // 이번 세션에서 실제 DOM에서 발견된 버튼인가? (삭제/비활성화된 확장의 버튼은 false)
+    function isLive(s, k) {
+        return (s.sets[k] || [k]).some((m) => liveKeys.has(m));
+    }
+
+    // 화면(프리뷰/목록)에 안 보이는 키(숨김·미감지)를 새 순서 목록에 원래 자리 근처로 다시 끼워 넣는다.
+    function mergeKeep(oldList, newVisible, shouldKeep) {
+        const out = [...newVisible];
+        for (const h of oldList.filter(shouldKeep)) {
+            if (out.includes(h)) continue;
+            const idx = oldList.indexOf(h);
+            let anchor = null;
+            for (let i = idx - 1; i >= 0; i--) {
+                if (out.includes(oldList[i])) { anchor = oldList[i]; break; }
+            }
+            out.splice(anchor === null ? 0 : out.indexOf(anchor) + 1, 0, h);
+        }
+        return out;
+    }
+
+    // 목록/설정에서 버튼 기록을 완전히 제거 (세트는 건드리지 않음)
+    function removeKey(s, k) {
+        if (isInSet(s, k)) return;
+        s.g1 = s.g1.filter((x) => x !== k);
+        s.g2 = s.g2.filter((x) => x !== k);
+        s.hidden = s.hidden.filter((x) => x !== k);
+        s.native = s.native.filter((x) => x !== k);
+        delete s.known[k];
+    }
+
     /* ---------- 버튼 탐색 / 식별 ---------- */
+
+    // 액션 아이콘 후보: 표준 .mes_button + 'mes_button' 클래스 없이 직접 만든 아이콘(예: mes_feedback)도 포함.
+    // 후자는 .extraMesButtons 안이나 .mes_buttons 바로 아래에 들어간다.
+    const CANDIDATES = [
+        '.mes_buttons .mes_button',
+        '.mes_buttons .extraMesButtons > *',
+        '.mes_buttons > *',
+        '.mes_buttons .mam-group > *',
+    ].join(',');
+    const NOT_BUTTON = '.extraMesButtons, .extraMesButtonsHint, .mes_edit_buttons, .mam-group, .mam-more-toggle';
 
     function getButtons(root) {
         if (!root) return [];
-        return [...root.querySelectorAll('.mes_buttons .mes_button')].filter(
-            (el) =>
-                !el.classList.contains('extraMesButtonsHint') &&
-                !el.classList.contains('mam-more-toggle') &&
-                !el.closest('.mes_edit_buttons'),
-        );
+        const out = [];
+        for (const el of root.querySelectorAll(CANDIDATES)) {
+            if (el.matches(NOT_BUTTON) || el.closest('.mes_edit_buttons')) continue;
+            if (!el.classList.contains('mes_button')) {
+                // 아이콘처럼 보이는 것만 (fa-* 클래스 또는 title 보유)
+                const iconLike = [...el.classList].some((c) => c.startsWith('fa-')) || el.hasAttribute('title');
+                if (!iconLike) continue;
+                // ST 기본 버튼과 같은 모양/호버 스타일을 받도록 클래스 부여 (getKey는 mes_button을 무시하므로 키는 그대로)
+                el.classList.add('mes_button');
+            }
+            out.push(el);
+        }
+        return out;
     }
 
     function getKey(el) {
@@ -169,21 +220,12 @@
         return changed;
     }
 
+    // 새로 감지된 버튼은 (이미 정해진 순서가 없으므로) 항상 보이는 그룹(g1)의 맨 뒤로.
+    // 다른 확장이 DOM 앞쪽에 끼워 넣거나 더보기 쪽 이웃 옆에 있어도 영향받지 않는다.
     function placeKey(s, key) {
         mergeNative(s, [key]);
-        const all = s.native;
-        const idx = all.indexOf(key);
-
-        const insertAt = (k, offset) => {
-            const lk = leaderOf(s, k);
-            for (const g of ['g1', 'g2']) {
-                const i = s[g].indexOf(lk);
-                if (i >= 0) { s[g].splice(i + offset, 0, key); return true; }
-            }
-            return false;
-        };
-        for (let i = idx - 1; i >= 0; i--) if (all[i] !== key && insertAt(all[i], 1)) return;
-        for (let i = idx + 1; i < all.length; i++) if (all[i] !== key && insertAt(all[i], 0)) return;
+        if (leaderOf(s, key) !== key) return; // 이미 세트의 멤버면 대표키가 자리를 가짐
+        if (s.g1.includes(key) || s.g2.includes(key)) return;
         s.g1.push(key);
     }
 
@@ -244,9 +286,15 @@
         const { g1, g2, toggle } = ensureGroups(mb);
 
         const byKey = new Map();
+        const seen = new Set();
         for (const b of getButtons(mes)) {
             const k = getKey(b);
             b.classList.toggle('mam-hidden', hiddenSet.has(leaderOf(s, k)));
+            // 다른 확장이 같은 버튼을 두 번 넣은 경우(템플릿 복제 + 직접 추가 등): 첫 번째만 남기고 숨김
+            const fallback = /^(icon|id|title):/.test(k);
+            const sig = fallback ? k + '|' + (b.getAttribute('title') || b.getAttribute('data-title') || '') : k;
+            b.classList.toggle('mam-dup', seen.has(sig));
+            seen.add(sig);
             if (!byKey.has(k)) byKey.set(k, []);
             byKey.get(k).push(b);
         }
@@ -268,7 +316,7 @@
         syncChildren(g1, d1);
         syncChildren(g2, d2);
 
-        const any2 = d2.some((b) => !b.classList.contains('mam-hidden'));
+        const any2 = d2.some((b) => !b.classList.contains('mam-hidden') && !b.classList.contains('mam-dup'));
         toggle.classList.toggle('mam-hidden', !any2);
         if (!any2) mes.classList.remove('mam-more-open');
     }
@@ -355,10 +403,15 @@
                         <div id="mam_hide_all" class="menu_button menu_button_icon">
                             <i class="fa-solid fa-eye-slash"></i><span>모두 해제</span>
                         </div>
+                        <div id="mam_cleanup" class="menu_button menu_button_icon" title="삭제된 확장의 아이콘 등, 현재 감지되지 않는 항목을 목록에서 제거">
+                            <i class="fa-solid fa-broom"></i><span>미감지 정리</span>
+                        </div>
                         <div id="mam_reset" class="menu_button menu_button_icon">
                             <i class="fa-solid fa-rotate-left"></i><span>초기화</span>
                         </div>
                     </div>
+
+                    <small id="mam_dormant" class="mam-desc" style="display:none"></small>
 
                     <fieldset class="mam-box">
                         <legend>Preview</legend>
@@ -399,6 +452,18 @@
             renderManager();
         });
 
+        $('#mam_cleanup').on('click', () => {
+            const s = settings();
+            const stale = Object.keys(s.known).filter((k) => !liveKeys.has(k) && !isInSet(s, k));
+            if (!stale.length) { toastr.info('감지되지 않는 항목이 없어요.'); return; }
+            const names = stale.map((k) => s.known[k].label || k).join(', ');
+            if (!confirm(`현재 감지되지 않는 ${stale.length}개 항목을 목록에서 제거할까요?\n${names}\n\n(확장을 다시 설치하면 새로 감지돼요)`)) return;
+            stale.forEach((k) => removeKey(s, k));
+            save();
+            applyAll();
+            renderManager();
+        });
+
         $('#mam_reset').on('click', () => {
             const s = settings();
             const members = nonLeaderMembers(s);
@@ -422,7 +487,7 @@
 
         const fill = (pv, keys) => {
             for (const key of keys) {
-                if (!s.known[key] || hidden.has(key)) continue;
+                if (!s.known[key] || hidden.has(key) || !isLive(s, key)) continue;
                 pv.append(
                     $('<span class="mam-pv-item">')
                         .attr('data-key', key)
@@ -583,23 +648,12 @@
         const hidden = new Set(s.hidden);
         const read = (sel) => $(`${sel} .mam-pv-item`).map((_, el) => $(el).attr('data-key')).get();
 
-        const merge = (oldList, newVisible) => {
-            const out = [...newVisible];
-            for (const h of oldList.filter((k) => hidden.has(k))) {
-                const idx = oldList.indexOf(h);
-                let anchor = null;
-                for (let i = idx - 1; i >= 0; i--) {
-                    if (out.includes(oldList[i])) { anchor = oldList[i]; break; }
-                }
-                out.splice(anchor === null ? 0 : out.indexOf(anchor) + 1, 0, h);
-            }
-            return out;
-        };
+        const keep = (k) => hidden.has(k) || !isLive(s, k);
 
         const oldG1 = [...s.g1];
         const oldG2 = [...s.g2];
-        s.g1 = merge(oldG1, read('#mam_pv1'));
-        s.g2 = merge(oldG2, read('#mam_pv2'));
+        s.g1 = mergeKeep(oldG1, read('#mam_pv1'), keep);
+        s.g2 = mergeKeep(oldG2, read('#mam_pv2'), keep);
         save();
         applyAll();
         // 프리뷰는 이미 사용자가 놓은 상태 그대로라서 다시 그리지 않고(끊김 방지), 아래 목록만 갱신
@@ -609,8 +663,9 @@
     function commitOrder() {
         const s = settings();
         const rows = (sel) => $(`${sel} .mam-row`).map((_, el) => $(el).attr('data-key')).get();
-        s.g1 = rows('#mam_g1');
-        s.g2 = rows('#mam_g2');
+        const dormant = (k) => !isLive(s, k);
+        s.g1 = mergeKeep(s.g1, rows('#mam_g1'), dormant);
+        s.g2 = mergeKeep(s.g2, rows('#mam_g2'), dormant);
         save();
         applyAll();
         renderPreview();
@@ -629,11 +684,11 @@
         if (members) {
             icon.addClass('mam-icon-set').html(members.map((m) => (st0.known[m] ? st0.known[m].html : '')).join(''));
             name.append($('<span>').text(members.map((m) => (st0.known[m] ? st0.known[m].label : m)).join(' / ')));
-            name.append($('<small>').text(members.join(' + ') + (members.some((m) => liveKeys.has(m)) ? '' : ' · 현재 감지 안 됨')));
+            name.append($('<small>').text(members.join(' + ')));
         } else {
             icon.html(info.html);
             name.append($('<span>').text(info.label));
-            name.append($('<small>').text(key + (liveKeys.has(key) ? '' : ' · 현재 감지 안 됨')));
+            name.append($('<small>').text(key));
         }
 
         const toggle = $('<label class="mam-toggle">');
@@ -651,7 +706,9 @@
             renderPreview();
         });
 
-        return row.append(handle, icon, name, toggle);
+        row.append(handle, icon, name, toggle);
+
+        return row;
     }
 
     function renderManager() {
@@ -669,9 +726,15 @@
         for (const [sel, keys] of [['#mam_g1', s.g1], ['#mam_g2', s.g2]]) {
             const list = $(sel).empty();
             for (const key of keys) {
-                if (s.known[key]) list.append(makeRow(key, s.known[key], hidden));
+                if (s.known[key] && isLive(s, key)) list.append(makeRow(key, s.known[key], hidden));
             }
         }
+
+        // 삭제·비활성화된 확장의 버튼은 목록에서 자동으로 숨김 (기록은 유지 → 다시 켜면 원래 자리로 복귀)
+        const dormant = [...s.g1, ...s.g2].filter((k) => s.known[k] && !isLive(s, k));
+        $('#mam_dormant')
+            .toggle(dormant.length > 0)
+            .text(`현재 감지되지 않는 항목 ${dormant.length}개(삭제·비활성화된 확장)는 숨겨 뒀어요. 확장을 다시 켜면 원래 자리로 돌아와요. 기록까지 지우려면 '미감지 정리'를 누르세요.`);
 
         if ($.fn.sortable) {
             $('#mam_g1, #mam_g2').sortable({
