@@ -1,0 +1,11 @@
+{
+    "display_name": "Message Actions Manager",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "nunca",
+    "version": "1.0.0",
+    "homePage": ""
+}

@@ -1,0 +1,256 @@
+/* ===== 메시지 헤더 ===== */
+.mes_buttons .mam-hidden {
+    display: none !important;
+}
+
+/* 기본 확장 메뉴(...)와 빈 extraMesButtons는 이 확장의 그룹으로 대체 */
+.mes_buttons .extraMesButtonsHint,
+.mes_buttons .extraMesButtons {
+    display: none !important;
+}
+
+.mes_buttons .mam-group1 {
+    display: contents;
+}
+
+.mes_buttons .mam-group2 {
+    display: none;
+}
+
+.mes.mam-more-open .mes_buttons .mam-group2 {
+    display: contents;
+}
+
+/* 펼쳐지면 … 버튼은 사라지고, 펼쳐진 아이콘이 그 자리(맨 오른쪽)에 온다 */
+.mes.mam-more-open .mes_buttons .mam-more-toggle {
+    display: none !important;
+}
+
+.mes_buttons .mam-more-toggle {
+    cursor: pointer;
+}
+
+/* ===== 설정 패널 ===== */
+/* input은 제외: ST 체크박스 체크 표시가 ::before의 box-shadow로 그려짐 */
+.mam-settings *:not(input) {
+    box-shadow: none !important;
+    text-shadow: none !important;
+    filter: none !important;
+}
+
+.mam-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 6px 0 10px;
+}
+
+/* 테마와 무관하게 보이는 선 색 (--SmartThemeBorderColor는 테마에 따라 투명/배경색일 수 있음) */
+.mam-settings {
+    --mam-line: var(--grey5050a, rgba(128, 128, 128, 0.5));
+}
+
+.mam-box {
+    margin: 0 0 12px;
+    padding: 8px 10px 10px;
+    border: 1px solid var(--mam-line) !important;
+    border-radius: 10px;
+    min-inline-size: 0;
+}
+
+.mam-box legend {
+    width: auto;
+    margin: 0;
+    padding: 0 6px;
+    font-size: 0.85em;
+    opacity: 0.7;
+    border: 0;
+}
+
+.mam-desc {
+    display: block;
+    opacity: 0.65;
+    line-height: 1.4;
+    margin-bottom: 8px;
+}
+
+.mam-preview {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    min-height: 34px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    background: rgba(128, 128, 128, 0.12);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
+}
+
+/* 놓을 수 있는 영역을 넉넉하게 + 항상 옅게 보이게 (비어 있어도 쉽게 맞출 수 있도록) */
+.mam-pv {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    min-width: 56px;
+    min-height: 40px;
+    padding: 2px 4px;
+    border-radius: 6px;
+    outline: 1px dashed var(--mam-line);
+    outline-offset: -1px;
+}
+
+.mam-pv:empty {
+    outline-color: var(--mam-line);
+}
+
+.mam-pv-item {
+    display: inline-flex;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* 드래그 중: 원래 자리의 아이콘은 흐리게(자리는 그대로 유지 → 레이아웃이 안 밀림) */
+.mam-pv-item.mam-drag-src {
+    opacity: 0.3;
+}
+
+/* 놓일 위치를 알려주는 커서 모양 세로선 (깜빡임 없음) */
+.mam-caret {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--SmartThemeQuoteColor);
+    pointer-events: none;
+    z-index: 2;
+}
+
+/* 포인터를 따라다니는 아이콘 (body 직속) */
+.mam-ghost {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 99999;
+    display: inline-flex;
+    box-sizing: border-box;
+    border-radius: 6px;
+    background: rgba(128, 128, 128, 0.25);
+    opacity: 0.9;
+    pointer-events: none;
+    will-change: transform;
+}
+
+.mam-grabbing,
+.mam-grabbing * {
+    cursor: grabbing !important;
+}
+
+.mam-preview .mam-sep {
+    opacity: 0.5;
+    padding: 0 6px;
+}
+
+.mam-preview .mes_button,
+.mam-ghost .mes_button,
+.mam-icon .mes_button {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    opacity: 1 !important;
+    pointer-events: none;
+    cursor: default;
+    position: static !important;
+}
+
+.mam-preview .mes_button,
+.mam-ghost .mes_button {
+    padding: 4px 6px;
+}
+
+.mam-list {
+    display: flex;
+    flex-direction: column;
+    min-height: 40px;
+    padding: 0;
+}
+
+.mam-list:empty::before {
+    content: '비어 있음 · 여기로 드래그해서 옮기세요';
+    opacity: 0.45;
+    font-size: 0.9em;
+    padding: 8px;
+}
+
+.mam-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    margin-bottom: 4px;
+    border-radius: 8px;
+    background: rgba(128, 128, 128, 0.12);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 8%, transparent);
+}
+
+.mam-row:last-child {
+    margin-bottom: 0;
+}
+
+.mam-row.mam-off {
+    opacity: 0.45;
+}
+
+.mam-placeholder {
+    height: 36px;
+    margin-bottom: 4px;
+    border: 1px dashed var(--mam-line);
+    border-radius: 8px;
+}
+
+.mam-handle {
+    cursor: grab;
+    opacity: 0.6;
+    padding: 8px 6px; /* 폰에서 잡기 쉽게 */
+    touch-action: none;
+}
+
+.mam-icon {
+    width: 32px;
+    flex: 0 0 32px;
+    display: flex;
+    justify-content: center;
+    font-size: 1.1em;
+}
+
+/* 세트(여러 아이콘 묶음) 행: 아이콘 폭을 내용에 맞춤 */
+.mam-icon.mam-icon-set {
+    width: auto;
+    flex: 0 0 auto;
+    gap: 2px;
+}
+
+.mam-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mam-name small {
+    display: block;
+    opacity: 0.55;
+}
+
+.mam-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
