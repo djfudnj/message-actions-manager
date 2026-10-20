@@ -332,9 +332,13 @@
     const pending = new Set();
     let raf = 0;
 
+    // rAF로 미루면 브라우저가 한 번 화면을 그린 뒤에야 정리되어, 다른 확장이 끼워 넣은
+    // 중복 아이콘이 한 프레임 보이는 깜빡임이 생긴다. 마이크로태스크는 페인트 전에 실행되므로
+    // 변경 직후, 화면에 그려지기 전에 바로 정리한다.
     function schedule() {
         if (raf) return;
-        raf = requestAnimationFrame(() => { raf = 0; flush(); });
+        raf = 1;
+        queueMicrotask(() => { raf = 0; flush(); });
     }
 
     function flush() {
