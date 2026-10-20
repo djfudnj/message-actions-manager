@@ -1,8 +1,11 @@
 # Message Actions Manager
 
-A SillyTavern extension to organize the action icons in the message.
+<img width="510" height="318" alt="화면 캡처 2026-10-20 232004" src="https://github.com/user-attachments/assets/e43e8cd2-76e8-4c99-97db-c35073d2b174" />
 
-메시지의 액션 아이콘(다른 확장이 추가한 것 포함)을 원하는 대로 정리하는 SillyTavern 확장입니다.
+
+A SillyTavern extension to customize the order and visibility of message action icons.
+
+메시지의 액션 아이콘의 순서와 표시여부를 원하는 대로 정리하는 SillyTavern 확장입니다.
 
 ## Features
 
