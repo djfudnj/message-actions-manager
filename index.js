@@ -8,7 +8,7 @@
 
     const MODULE = 'message_actions_manager';
     // sets: { 대표키: [멤버키...] } — 같은 자리를 번갈아 쓰는 버튼 묶음. 그룹 목록/숨김 목록에는 대표키만 들어간다.
-    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {} };
+    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {}, noShadow: true };
 
     // 항상 세트로 묶여 있는 쌍 (사용자가 풀 수 없음)
     const DEFAULT_SETS = [
@@ -46,6 +46,11 @@
     }
 
     const save = () => ctx().saveSettingsDebounced();
+
+    // 메시지 액션 아이콘의 그림자 일괄 해제 여부 (body 클래스로 CSS 토글)
+    const applyShadowSetting = () => {
+        document.body.classList.toggle('mam-no-shadow', !!settings().noShadow);
+    };
 
     /* ---------- 세트(번갈아 보이는 버튼 묶음) ---------- */
 
@@ -182,7 +187,7 @@
 
     function snapshot(el) {
         const c = el.cloneNode(true);
-        c.classList.remove('mam-hidden', 'displayNone', 'hidden');
+        c.classList.remove('mam-hidden', 'mam-dup', 'displayNone', 'hidden');
         c.removeAttribute('style');
         c.removeAttribute('id');
         c.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
@@ -236,6 +241,10 @@
         return [...ordered, ...rest];
     }
 
+    // 이번 세션에서 이미 스냅샷을 최신화한 키 (같은 키가 상태에 따라 아이콘을 바꾸는 경우(접기/펼치기 등)
+    // 메시지마다 계속 덮어써서 저장이 반복되는 것을 막기 위해 세션당 한 번만 갱신)
+    const refreshedKeys = new Set();
+
     function register(els) {
         const s = settings();
         let changed = false;
@@ -245,7 +254,20 @@
             if (!s.known[key]) {
                 s.known[key] = { label: getLabel(el, key), html: snapshot(el) };
                 placeKey(s, key); // 새 버튼은 원래 순서 위치의 그룹1/2 이웃 옆으로
+                refreshedKeys.add(key);
                 changed = true;
+            } else if (!refreshedKeys.has(key)) {
+                // 이미 저장된 버튼도, 지금 실제로 보이는 아이콘으로 한 번 갱신
+                // (다른 확장이 아이콘을 바꿨을 때 설정 화면에 옛 아이콘이 남는 문제 방지)
+                refreshedKeys.add(key);
+                const html = snapshot(el);
+                const label = getLabel(el, key);
+                if (s.known[key].html !== html || s.known[key].label !== label) {
+                    s.known[key].html = html;
+                    s.known[key].label = label;
+                    uiDirty = true;
+                    changed = true;
+                }
             }
         }
         return changed;
@@ -274,7 +296,7 @@
         g2.className = 'mam-group mam-group2';
         const toggle = document.createElement('div');
         toggle.className = 'mes_button mam-more-toggle fa-solid fa-ellipsis interactable';
-        toggle.title = '더보기';
+        toggle.title = 'More';
         toggle.tabIndex = 0;
         mb.prepend(g1, toggle, g2); // … 버튼과 펼쳐진 그룹2 모두 맨 오른쪽에 위치
         return { g1, g2, toggle };
@@ -402,36 +424,41 @@
                 <div class="inline-drawer-content">
                     <div class="mam-toolbar">
                         <div id="mam_show_all" class="menu_button menu_button_icon">
-                            <i class="fa-solid fa-eye"></i><span>모두 표시</span>
+                            <i class="fa-solid fa-eye"></i><span>Show All</span>
                         </div>
                         <div id="mam_hide_all" class="menu_button menu_button_icon">
-                            <i class="fa-solid fa-eye-slash"></i><span>모두 해제</span>
+                            <i class="fa-solid fa-eye-slash"></i><span>Hide All</span>
                         </div>
-                        <div id="mam_cleanup" class="menu_button menu_button_icon" title="삭제된 확장의 아이콘 등, 현재 감지되지 않는 항목을 목록에서 제거">
-                            <i class="fa-solid fa-broom"></i><span>미감지 정리</span>
+                        <div id="mam_cleanup" class="menu_button menu_button_icon" title="Remove entries no longer detected (e.g. icons from uninstalled extensions)">
+                            <i class="fa-solid fa-broom"></i><span>Clean Up</span>
                         </div>
                         <div id="mam_reset" class="menu_button menu_button_icon">
-                            <i class="fa-solid fa-rotate-left"></i><span>초기화</span>
+                            <i class="fa-solid fa-rotate-left"></i><span>Reset</span>
                         </div>
                     </div>
 
                     <small id="mam_dormant" class="mam-desc" style="display:none"></small>
 
+                    <label class="checkbox_label" for="mam_no_shadow" title="Remove shadows from all message action icons">
+                        <input type="checkbox" id="mam_no_shadow">
+                        <span>Remove shadows from message action icons</span>
+                    </label>
+
                     <fieldset class="mam-box">
                         <legend>Preview</legend>
-                        <small class="mam-desc">프리뷰의 아이콘을 잡고 드래그하면 순서를 바꿀 수 있어요. 놓일 위치는 세로선으로 표시돼요.</small>
+                        <small class="mam-desc">Drag icons to reorder. A vertical line marks the drop position.</small>
                         <div id="mam_preview" class="mam-preview"></div>
                     </fieldset>
 
                     <fieldset class="mam-box">
                         <legend>Always Display</legend>
-                        <small class="mam-desc">메시지 헤더에 항상 보이는 아이콘이에요. 왼쪽 핸들을 잡고 순서를 바꿀 수 있어요.</small>
+                        <small class="mam-desc">Icons always shown in the message header. Drag the handle to reorder.</small>
                         <div id="mam_g1" class="mam-list"></div>
                     </fieldset>
 
                     <fieldset class="mam-box">
-                        <legend>더보기</legend>
-                        <small class="mam-desc">… 버튼을 눌러야 펼쳐지는 아이콘이에요. 핸들을 잡고 그룹 사이로 드래그해서 옮길 수 있어요.</small>
+                        <legend>More</legend>
+                        <small class="mam-desc">Icons revealed by the … button. Drag the handle to move them between groups.</small>
                         <div id="mam_g2" class="mam-list"></div>
                     </fieldset>
 
@@ -440,6 +467,14 @@
         </div>`;
         $('#extensions_settings2').append(html);
         initPreviewDrag();
+
+        $('#mam_no_shadow')
+            .prop('checked', !!settings().noShadow)
+            .on('change', function () {
+                settings().noShadow = this.checked;
+                applyShadowSetting();
+                save();
+            });
 
         $('#mam_show_all').on('click', () => {
             settings().hidden = [];
@@ -459,9 +494,9 @@
         $('#mam_cleanup').on('click', () => {
             const s = settings();
             const stale = Object.keys(s.known).filter((k) => !liveKeys.has(k) && !isInSet(s, k));
-            if (!stale.length) { toastr.info('감지되지 않는 항목이 없어요.'); return; }
+            if (!stale.length) { toastr.info('No undetected items.'); return; }
             const names = stale.map((k) => s.known[k].label || k).join(', ');
-            if (!confirm(`현재 감지되지 않는 ${stale.length}개 항목을 목록에서 제거할까요?\n${names}\n\n(확장을 다시 설치하면 새로 감지돼요)`)) return;
+            if (!confirm(`Remove ${stale.length} undetected item(s) from the list?\n${names}\n\n(They'll be detected again if the extension is reinstalled.)`)) return;
             stale.forEach((k) => removeKey(s, k));
             save();
             applyAll();
@@ -697,7 +732,7 @@
 
         const toggle = $('<label class="mam-toggle">');
         const cb = $('<input type="checkbox">').prop('checked', !hidden.has(key));
-        toggle.append(cb, $('<span>표시</span>'));
+        toggle.append(cb, $('<span>Show</span>'));
 
         cb.on('change', () => {
             const st = settings();
@@ -738,7 +773,7 @@
         const dormant = [...s.g1, ...s.g2].filter((k) => s.known[k] && !isLive(s, k));
         $('#mam_dormant')
             .toggle(dormant.length > 0)
-            .text(`현재 감지되지 않는 항목 ${dormant.length}개(삭제·비활성화된 확장)는 숨겨 뒀어요. 확장을 다시 켜면 원래 자리로 돌아와요. 기록까지 지우려면 '미감지 정리'를 누르세요.`);
+            .text(`${dormant.length} undetected item(s) (uninstalled/disabled extensions) hidden. They return to their original spot when the extension is re-enabled. Use 'Clean Up' to delete their records.`);
 
         if ($.fn.sortable) {
             $('#mam_g1, #mam_g2').sortable({
@@ -755,6 +790,7 @@
 
     jQuery(() => {
         settings();
+        applyShadowSetting();
         buildUI();
 
         // 헤더의 … 버튼: 그룹2 펼치기/접기
