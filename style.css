@@ -42,19 +42,19 @@
 /* 아이콘들이 .mam-group 래퍼 안으로 옮겨지면서, 테마가 구조 기반 선택자
    (.mes_buttons > .mes_button, .extraMesButtons .mes_button 등)로 걸어둔
    그림자 제거 규칙이 빠지는 문제를 막기 위해 그룹 안 아이콘에도 직접 적용.
-   그림자를 원한다면 아래 블록을 삭제하세요. */
-.mes_buttons .mam-group .mes_button,
-.mes_buttons .mam-group > *,
-.mes_buttons .mam-more-toggle {
+   설정 패널의 'Remove shadows' 체크박스로 켜고 끌 수 있습니다 (body.mam-no-shadow). */
+body.mam-no-shadow .mes_buttons .mam-group .mes_button,
+body.mam-no-shadow .mes_buttons .mam-group > *,
+body.mam-no-shadow .mes_buttons .mam-more-toggle {
     box-shadow: none !important;
     text-shadow: none !important;
     filter: none !important;
 }
 
-.mes_buttons .mam-group .mes_button::before,
-.mes_buttons .mam-group .mes_button::after,
-.mes_buttons .mam-more-toggle::before,
-.mes_buttons .mam-more-toggle::after {
+body.mam-no-shadow .mes_buttons .mam-group .mes_button::before,
+body.mam-no-shadow .mes_buttons .mam-group .mes_button::after,
+body.mam-no-shadow .mes_buttons .mam-more-toggle::before,
+body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
     box-shadow: none !important;
     text-shadow: none !important;
     filter: none !important;
@@ -210,7 +210,7 @@
 }
 
 .mam-list:empty::before {
-    content: '비어 있음 · 여기로 드래그해서 옮기세요';
+    content: 'Empty · drag here to move';
     opacity: 0.45;
     font-size: 0.9em;
     padding: 8px;
