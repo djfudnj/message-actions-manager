@@ -8,12 +8,13 @@
 
     const MODULE = 'message_actions_manager';
     // sets: { 대표키: [멤버키...] } — 같은 자리를 번갈아 쓰는 버튼 묶음. 그룹 목록/숨김 목록에는 대표키만 들어간다.
-    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {}, noShadow: true };
+    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {}, noShadow: true, scrollActions: false };
 
     // 항상 세트로 묶여 있는 쌍 (사용자가 풀 수 없음)
     const DEFAULT_SETS = [
         ['mes_hide', 'mes_unhide'],
         ['mes_create_bookmark', 'mes_bookmark'],
+        ['mes_fold', 'mes_unfold'],
     ];
 
     const IGNORE_CLASSES = new Set([
@@ -50,6 +51,11 @@
     // 메시지 액션 아이콘의 그림자 일괄 해제 여부 (body 클래스로 CSS 토글)
     const applyShadowSetting = () => {
         document.body.classList.toggle('mam-no-shadow', !!settings().noShadow);
+    };
+
+    // 아이콘이 너무 많을 때: 기본은 다음 줄로 넘김, 켜면 가로 스크롤
+    const applyScrollSetting = () => {
+        document.body.classList.toggle('mam-scroll', !!settings().scrollActions);
     };
 
     /* ---------- 세트(번갈아 보이는 버튼 묶음) ---------- */
@@ -443,6 +449,10 @@
                         <input type="checkbox" id="mam_no_shadow">
                         <span>Remove shadows from message action icons</span>
                     </label>
+                    <label class="checkbox_label" for="mam_scroll" title="When there are too many icons: scroll sideways instead of wrapping to the next line">
+                        <input type="checkbox" id="mam_scroll">
+                        <span>Scroll icons sideways instead of wrapping to a new line</span>
+                    </label>
 
                     <fieldset class="mam-box">
                         <legend>Preview</legend>
@@ -473,6 +483,14 @@
             .on('change', function () {
                 settings().noShadow = this.checked;
                 applyShadowSetting();
+                save();
+            });
+
+        $('#mam_scroll')
+            .prop('checked', !!settings().scrollActions)
+            .on('change', function () {
+                settings().scrollActions = this.checked;
+                applyScrollSetting();
                 save();
             });
 
@@ -791,6 +809,7 @@
     jQuery(() => {
         settings();
         applyShadowSetting();
+        applyScrollSetting();
         buildUI();
 
         // 헤더의 … 버튼: 그룹2 펼치기/접기
