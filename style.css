@@ -18,6 +18,41 @@
     display: none;
 }
 
+/* ===== 아이콘이 너무 많을 때 잘리는 문제 ===== */
+/* 아이콘은 크기를 유지 (찌그러지지 않게) */
+.mes_buttons .mam-group > *,
+.mes_buttons .mam-more-toggle {
+    flex-shrink: 0;
+}
+
+/* 기본: 넘치면 다음 줄로 */
+.mes_buttons:has(> .mam-group1) {
+    flex-wrap: wrap !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    min-width: 0;
+    max-width: 100%;
+    row-gap: 2px;
+}
+
+/* 옵션 켬: 한 줄 유지 + 가로 스크롤 (손가락/휠로 밀기)
+   safe: 넘칠 때는 오른쪽 정렬이 아니라 왼쪽부터 시작해서 앞쪽 아이콘이 잘리지 않게 한다 */
+body.mam-scroll .mes_buttons:has(> .mam-group1) {
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    justify-content: flex-end !important;
+    justify-content: safe flex-end !important;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+}
+
+body.mam-scroll .mes_buttons:has(> .mam-group1)::-webkit-scrollbar {
+    display: none;
+}
+
 .mes.mam-more-open .mes_buttons .mam-group2 {
     display: contents;
 }
