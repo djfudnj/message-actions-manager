@@ -25,11 +25,11 @@ Uncheck **Show** to hide an icon from the message actions.
 
 ## Extras
 
-### 1. Remove shadows from message action icons
+### 4. Remove shadows from message action icons
 Removes shadows from the icons.
 
-### 2. Scroll icons sideways instead of wrapping to a new line
+### 5. Scroll icons sideways instead of wrapping to a new line
 When there are too many icons, keeps them on one line and lets you scroll horizontally instead of wrapping.
 
-### 3. Clean Up
+### 6. Clean Up
 Removes leftover entries from extensions that have been uninstalled or disabled.
