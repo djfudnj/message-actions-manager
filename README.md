@@ -1,10 +1,7 @@
 # Message Actions Manager
 
 <div align="center">
-
 <img width="640" height="362" alt="1000313807" src="https://github.com/user-attachments/assets/5b88f848-ef73-49eb-8624-40c9d46c7bca" />
-
-
 </div>
 
 
@@ -17,8 +14,7 @@ Icons can be split into two groups: **Always**, which is always shown in the mes
 ## Main Features
 
 <div align="center">
-<img width="48%" alt="Preview" src="https://github.com/user-attachments/assets/abf25b06-1952-44e7-871b-5b28bff8f998" />
-<video src="https://github.com/user-attachments/assets/e23ac3c6-da6b-4d99-af24-35a9974d77a5" width="48%" controls muted></video>
+<img width="50%" alt="Preview" src="https://github.com/user-attachments/assets/abf25b06-1952-44e7-871b-5b28bff8f998" />
 </div>
 
 ### 0. Preview
