@@ -66,26 +66,13 @@ body.mam-scroll .mes_buttons.mam-ready::-webkit-scrollbar {
     cursor: pointer;
 }
 
-/* 다른 확장이 편집/렌더 때마다 버튼을 그룹 밖(.mes_buttons 바로 아래)에 다시 끼워 넣으면,
-   정리(mam-dup 처리)되기 전 한 프레임 동안 중복 아이콘이 깜빡이며 보인다.
-   그룹 구성이 끝난 메시지에서 그룹 밖에 있는 버튼은 정리되기 전까지 숨긴다.
-   (진짜 새 버튼은 정리 시 그룹 안으로 옮겨지고, 아이콘이 아닌 요소는 .mam-keep을 받아 제자리에서 정상 표시됨) */
-.mes_buttons.mam-ready > *:not(.mam-group):not(.mam-more-toggle):not(.mam-keep):not(.extraMesButtons):not(.extraMesButtonsHint):not(.mes_edit_buttons) {
-    display: none !important;
-}
-
 /* 아이콘들이 .mam-group 래퍼 안으로 옮겨지면서, 테마가 구조 기반 선택자
    (.mes_buttons > .mes_button, .extraMesButtons .mes_button 등)로 걸어둔
    그림자 제거 규칙이 빠지는 문제를 막기 위해 그룹 안 아이콘에도 직접 적용.
    설정 패널의 'Remove shadows' 체크박스로 켜고 끌 수 있습니다 (body.mam-no-shadow). */
 body.mam-no-shadow .mes_buttons .mam-group .mes_button,
 body.mam-no-shadow .mes_buttons .mam-group > *,
-body.mam-no-shadow .mes_buttons .mam-more-toggle {
-    box-shadow: none !important;
-    text-shadow: none !important;
-    filter: none !important;
-}
-
+body.mam-no-shadow .mes_buttons .mam-more-toggle,
 body.mam-no-shadow .mes_buttons .mam-group .mes_button::before,
 body.mam-no-shadow .mes_buttons .mam-group .mes_button::after,
 body.mam-no-shadow .mes_buttons .mam-more-toggle::before,
@@ -155,10 +142,6 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
     margin-top: calc(var(--mam-sp) * 2);
 }
 
-.mam-dormant {
-    margin-top: calc(var(--mam-sp) * 1.5);
-}
-
 /* 접이식 박스: 접히면 제목 + 안내 문구만 남김 */
 .mam-toggle {
     cursor: pointer;
@@ -220,6 +203,9 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
 .mam-opt-title {
     flex: 1 1 auto;
     min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: calc(var(--mam-sp) * 2.5);
     font-weight: var(--mam-strong);
 }
 
@@ -471,12 +457,6 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
 }
 
 /* ===== Edit Buttons Group ===== */
-.mam-opt-title {
-    display: flex;
-    align-items: center;
-    gap: calc(var(--mam-sp) * 2.5);
-}
-
 .mam-edit-ico {
     flex: 0 0 auto;
     width: 1.3em;
@@ -494,9 +474,17 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
 }
 
 /* ===== 위/아래 이동 중 잠깐 열리는 편집 UI 숨김 (본문은 화면용 사본으로 대체) ===== */
-body.mam-quiet-edit #chat .edit_textarea,
-body.mam-quiet-edit #chat .mes_edit_buttons {
+body.mam-quiet-edit #chat .edit_textarea {
     visibility: hidden !important;
+}
+
+/* 편집 버튼은 자리까지 숨기고(레이아웃 흔들림 방지), 편집 모드가 숨겨버리는 액션 아이콘 영역은 계속 보이게 한다 */
+body.mam-quiet-edit #chat .mes_edit_buttons {
+    display: none !important;
+}
+
+body.mam-quiet-edit #chat .mes_buttons {
+    display: flex !important;
 }
 
 #chat .mes_text[data-mam-lock] {

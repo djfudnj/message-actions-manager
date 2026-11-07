@@ -8,25 +8,22 @@
 
     const MODULE = 'message_actions_manager';
     const TITLE = 'Message Actions Manager';
-    const SCHEMA_VERSION = 2;
-    // 저장되는 버튼 종류의 상한 — 다른 확장이 메시지마다 다른 id/title을 쓰더라도 설정 파일이 끝없이 커지지 않게 한다
-    const MAX_KNOWN = 300;
-    const DAY_MS = 24 * 60 * 60 * 1000;
-    // 이 기간 동안 한 번도 감지되지 않은 버튼만 '미감지'(Clean Up 대상)로 본다.
-    // (마지막 메시지에만/특정 챗에서만 나타나는 조건부 버튼을 오탐하지 않기 위함)
-    const STALE_MS = 14 * DAY_MS;
+    const SCHEMA_VERSION = 3;
 
-    // sets: { 대표키: [멤버키...] } — 같은 자리를 번갈아 쓰는 버튼 묶음. 그룹 목록/숨김 목록에는 대표키만 들어간다.
-    // saved: Save 버튼으로 저장한 배치 { g1, g2, hidden, sets } (없으면 null). Reset 시 이 상태로 복원.
-    // known[key]: { label, html, seen }  (seen = 마지막으로 감지된 시각, ms)
-    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {}, noShadow: true, scrollActions: true, moreRight: true, editExtract: {}, saved: null, version: 0 };
+    // saved: Save 버튼으로 저장한 배치 { g1, g2, hidden } (없으면 null). Reset 시 이 상태로 복원.
+    // known[key]: { label, html }
+    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], noShadow: true, scrollActions: true, moreRight: true, editExtract: {}, saved: null, version: 0 };
 
-    // 항상 세트로 묶여 있는 쌍 (사용자가 풀 수 없음)
-    const DEFAULT_SETS = [
-        ['mes_hide', 'mes_unhide'],
-        ['mes_create_bookmark', 'mes_bookmark'],
-        ['mes_fold', 'mes_unfold'],
-    ];
+    // 같은 자리를 번갈아 쓰는 고정 버튼 쌍 (대표키 -> 멤버). 그룹 목록/숨김 목록에는 대표키만 들어간다.
+    const PAIRS = {
+        mes_hide: ['mes_hide', 'mes_unhide'],
+        mes_create_bookmark: ['mes_create_bookmark', 'mes_bookmark'],
+        mes_fold: ['mes_fold', 'mes_unfold'],
+    };
+    const LEADER = {};
+    for (const [lead, members] of Object.entries(PAIRS)) for (const m of members) LEADER[m] = lead;
+    const leaderOf = (k) => LEADER[k] || k;
+    const isPaired = (k) => k in LEADER;
 
     const IGNORE_CLASSES = new Set([
         'mes_button', 'interactable', 'list-group-item', 'hidden', 'displayNone',
@@ -34,19 +31,9 @@
     ]);
     const FA_GENERIC = new Set(['fa-solid', 'fa-regular', 'fa-brands', 'fa-fw']);
 
-    const liveKeys = new Set();
+    const liveKeys = new Set(); // 이번 세션에 실제로 감지된 버튼
     let uiDirty = false;
-    let capWarned = false;
     const ctx = () => SillyTavern.getContext();
-
-    function supported() {
-        try {
-            const c = ctx();
-            return !!(c && c.extensionSettings && typeof c.saveSettingsDebounced === 'function');
-        } catch {
-            return false;
-        }
-    }
 
     function settings() {
         const { extensionSettings } = ctx();
@@ -56,8 +43,14 @@
             if (s[k] === undefined) s[k] = structuredClone(DEFAULTS[k]);
         }
         // 어느 그룹에도 없는 버튼은 그룹1로 (저장 이후 새로 설치된 확장의 버튼도 여기서 그룹1 맨 뒤로 들어감)
-        const placed = new Set([...s.g1, ...s.g2, ...nonLeaderMembers(s)]);
-        for (const k of Object.keys(s.known)) if (!placed.has(k)) s.g1.push(k);
+        // 옛 버전(sets 보유)은 migrate()가 변환하기 전까지 건드리지 않는다
+        if (!s.sets) {
+            const placed = new Set([...s.g1, ...s.g2]);
+            for (const k of Object.keys(s.known)) {
+                const lead = leaderOf(k);
+                if (!placed.has(lead)) { s.g1.push(lead); placed.add(lead); }
+            }
+        }
         return s;
     }
 
@@ -65,41 +58,42 @@
     function migrate() {
         const s = settings();
         if (s.version >= SCHEMA_VERSION) return;
-        // 옛 개발 버전의 잔여 필드 정리
-        delete s.order;
-        delete s.extractEdit;
-        delete s.ignored;
-        for (const k of ['mes_ext_edit_copy', 'mes_ext_edit_delete']) removeKey(s, k);
-        // 감지 시각이 없던 기록은 '지금 본 것'으로 시작 → 14일 뒤부터 미감지 대상이 됨
-        const now = Date.now();
-        for (const rec of Object.values(s.known)) if (!rec.seen) rec.seen = now;
+        if (s.version < 2) {
+            // 옛 개발 버전의 잔여 필드 정리
+            delete s.order;
+            delete s.extractEdit;
+            delete s.ignored;
+            for (const k of ['mes_ext_edit_copy', 'mes_ext_edit_delete']) removeKey(s, k);
+        }
+        // v3: 범용 sets 저장 → 고정 PAIRS. 대표키가 달랐던 기록은 새 대표키로 바꿔 준다
+        const fix = (a) => [...new Set(a.map(leaderOf))];
+        s.g1 = fix(s.g1);
+        s.g2 = fix(s.g2);
+        s.hidden = fix(s.hidden);
+        if (s.saved) s.saved = { g1: fix(s.saved.g1), g2: fix(s.saved.g2), hidden: fix(s.saved.hidden) };
+        delete s.sets;
+        for (const rec of Object.values(s.known)) delete rec.seen;
+        settings(); // sets가 사라진 상태에서 미배치 버튼 정리
         s.version = SCHEMA_VERSION;
         save();
     }
 
     const save = () => ctx().saveSettingsDebounced();
 
-    // 메시지 액션 아이콘의 그림자 일괄 해제 여부
-    const applyShadowSetting = () => {
-        document.body.classList.toggle('mam-no-shadow', !!settings().noShadow);
-    };
-
-    // 켜면 가로 스크롤
-    const applyScrollSetting = () => {
-        document.body.classList.toggle('mam-scroll', !!settings().scrollActions);
-    };
-
-    // More(…) 그룹 위치: 켬 = 오른쪽(기본), 끔 = 왼쪽 (CSS order로 처리, body 클래스로 토글)
-    const applyMoreSetting = () => {
-        document.body.classList.toggle('mam-more-left', !settings().moreRight);
-    };
+    // 그림자 제거 / 가로 스크롤 / More(…) 그룹 위치 — 모두 body 클래스로 처리 (CSS)
+    function applyBodyFlags() {
+        const s = settings();
+        const cl = document.body.classList;
+        cl.toggle('mam-no-shadow', !!s.noShadow);
+        cl.toggle('mam-scroll', !!s.scrollActions);
+        cl.toggle('mam-more-left', !s.moreRight);
+    }
 
     /* ---------- 편집 메뉴(.mes_edit_buttons)의 버튼을 독립 아이콘으로 빼기 ----------
      * ST 원본 .mes_edit_* 핸들러는 '편집 중인 메시지'(this_edit_mes_id)를 전제로 동작한다.
      * 그래서 클릭하면 → 편집 모드 진입 → 원본 버튼 클릭(ST 확인 팝업 그대로) → 아직 편집 중이면 취소 로 처리한다.
      * (keepEditing: 편집 모드가 계속 필요한 버튼은 취소하지 않음)
      */
-    const EDIT_SKIP = new Set(['mes_edit_done', 'mes_edit_cancel']);
     const EDIT_DEFS = {
         mes_edit_copy: { icon: 'fa-clone', title: 'Copy this message' },
         mes_edit_add_reasoning: { icon: 'fa-lightbulb', title: 'Add reasoning block', keepEditing: true },
@@ -111,17 +105,6 @@
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     let busy = false; // 편집 모드 흉내 작업은 한 번에 하나만 (ST의 편집 상태와 아래 quiet 상태가 전역이라서)
     const isEditing = (mes) => !!mes.querySelector('.edit_textarea');
-
-    // 이 ST 버전에만 있는 편집 버튼(알려진 목록 밖)도 DOM에서 찾아 목록에 추가
-    function discoverEditDefs() {
-        for (const el of document.querySelectorAll('.mes_edit_buttons > *')) {
-            const classes = [...el.classList];
-            const nk = classes.find((c) => c.startsWith('mes_edit_') && !EDIT_SKIP.has(c));
-            if (!nk || EDIT_DEFS[nk]) continue;
-            const icon = classes.find((c) => c.startsWith('fa-') && !FA_GENERIC.has(c)) || 'fa-circle';
-            EDIT_DEFS[nk] = { icon, title: el.getAttribute('title') || nk };
-        }
-    }
 
     const editingMes = () => document.querySelector('#chat .edit_textarea')?.closest('.mes') || null;
 
@@ -177,17 +160,16 @@
 
     const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-    // 확인 팝업 (ST 팝업 사용, 없으면 브라우저 confirm). 기본 선택은 항상 취소.
+    // ST 확인 팝업. 기본 선택은 항상 취소.
     async function askConfirm(title, detail, okText) {
         const { callGenericPopup, POPUP_TYPE, POPUP_RESULT } = ctx();
-        if (!callGenericPopup || !POPUP_TYPE) return window.confirm(detail ? `${title}\n${detail}` : title);
         const r = await callGenericPopup(
             `<h3>${esc(title)}</h3><div style="white-space:pre-wrap">${esc(detail || '')}</div>`,
             POPUP_TYPE.CONFIRM,
             '',
-            { okButton: okText, cancelButton: 'Cancel', defaultResult: POPUP_RESULT?.NEGATIVE ?? 0 },
+            { okButton: okText, cancelButton: 'Cancel', defaultResult: POPUP_RESULT.NEGATIVE },
         );
-        return POPUP_RESULT ? r === POPUP_RESULT.AFFIRMATIVE : r === true;
+        return r === POPUP_RESULT.AFFIRMATIVE;
     }
 
     // 응답 생성 중(중지 버튼이 보이는 동안)에는 메시지 배열을 건드리지 않는다
@@ -259,8 +241,6 @@
 
     // 켜진 버튼만 각 메시지에 삽입 / 꺼진 버튼은 제거
     function syncExtButtons(mb, g1, s) {
-        // 켜진 옵션이 없고 남은 버튼도 없으면 할 일 없음 (메시지마다 querySelector 5번 하는 것 방지)
-        if (!Object.values(s.editExtract).some(Boolean) && !mb.querySelector('.mam-x')) return;
         for (const [nk, def] of Object.entries(EDIT_DEFS)) {
             const exist = mb.querySelector(`.${extKeyOf(nk)}`);
             const on = !!s.editExtract[nk];
@@ -303,81 +283,9 @@
         }
     }
 
-    /* ---------- 세트(번갈아 보이는 버튼 묶음) ---------- */
+    /* ---------- 기록 관리 ---------- */
 
-    function leaderOf(s, k) {
-        for (const l of Object.keys(s.sets)) if (s.sets[l].includes(k)) return l;
-        return k;
-    }
-
-    // 멤버키 -> 대표키 맵 (flush/applyAll마다 한 번만 만들어 재사용)
-    function leaderMapOf(s) {
-        const map = new Map();
-        for (const l of Object.keys(s.sets)) for (const m of s.sets[l]) if (!map.has(m)) map.set(m, l);
-        return map;
-    }
-
-    function nonLeaderMembers(s) {
-        const out = new Set();
-        for (const l of Object.keys(s.sets)) for (const m of s.sets[l]) if (m !== l) out.add(m);
-        return out;
-    }
-
-    function makeSet(s, keys) {
-        const union = new Set();
-        for (const k of keys) (s.sets[leaderOf(s, k)] || [k]).forEach((m) => union.add(m));
-        const rank = (k) => { const i = s.native.indexOf(k); return i < 0 ? 1e9 : i; };
-        const members = [...union].sort((a, b) => rank(a) - rank(b));
-        if (members.length < 2) return false;
-
-        // 대표키: 현재 목록에서 가장 앞에 있는 것
-        const leaders = [...new Set(members.map((m) => leaderOf(s, m)))];
-        const pos = (k) => {
-            const i1 = s.g1.indexOf(k);
-            if (i1 >= 0) return i1;
-            const i2 = s.g2.indexOf(k);
-            return i2 >= 0 ? s.g1.length + i2 : 1e9;
-        };
-        leaders.sort((a, b) => pos(a) - pos(b));
-        const lead = leaders[0];
-
-        const anyHidden = leaders.some((l) => s.hidden.includes(l));
-        for (const l of leaders) {
-            delete s.sets[l];
-            if (l === lead) continue;
-            s.g1 = s.g1.filter((k) => k !== l);
-            s.g2 = s.g2.filter((k) => k !== l);
-        }
-        s.hidden = s.hidden.filter((k) => !members.includes(k));
-        if (anyHidden) s.hidden.push(lead);
-        if (!s.g1.includes(lead) && !s.g2.includes(lead)) s.g1.push(lead);
-
-        s.sets[lead] = members;
-        return true;
-    }
-
-    function seedSets(s) {
-        let changed = false;
-        for (const [a, b] of DEFAULT_SETS) {
-            if (!s.known[a] || !s.known[b]) continue;
-            if (leaderOf(s, a) === leaderOf(s, b)) continue;
-            changed = makeSet(s, [a, b]) || changed;
-        }
-        return changed;
-    }
-
-    function isInSet(s, k) {
-        return !!s.sets[k] || nonLeaderMembers(s).has(k);
-    }
-
-    // 이번 세션에 감지됐거나, 최근(STALE_MS 이내)에 감지된 적이 있는 버튼인가?
-    // (조건부 버튼이 현재 챗에 없다고 목록에서 사라지지 않도록)
-    const isRecent = (s, k) => !!s.known[k] && Date.now() - (s.known[k].seen || 0) < STALE_MS;
-    function isShown(s, k) {
-        return (s.sets[k] || [k]).some((m) => liveKeys.has(m) || isRecent(s, m));
-    }
-
-    // 화면(프리뷰/목록)에 안 보이는 키(숨김·미감지)를 새 순서 목록에 원래 자리 근처로 다시 끼워 넣는다.
+    // 화면(프리뷰/목록)에 안 보이는 키(숨김 등)를 새 순서 목록에 원래 자리 근처로 다시 끼워 넣는다.
     function mergeKeep(oldList, newVisible, shouldKeep) {
         const out = [...newVisible];
         for (const h of oldList.filter(shouldKeep)) {
@@ -392,9 +300,9 @@
         return out;
     }
 
-    // 목록/설정에서 버튼 기록을 완전히 제거 (세트는 건드리지 않음). 저장된 배치(saved)에서도 함께 제거.
+    // 목록/설정에서 버튼 기록을 완전히 제거 (고정 쌍은 건드리지 않음). 저장된 배치(saved)에서도 함께 제거.
     function removeKey(s, k) {
-        if (isInSet(s, k)) return;
+        if (isPaired(k)) return;
         s.g1 = s.g1.filter((x) => x !== k);
         s.g2 = s.g2.filter((x) => x !== k);
         s.hidden = s.hidden.filter((x) => x !== k);
@@ -409,12 +317,15 @@
 
     // 현재 배치를 저장용 스냅샷으로
     function layoutSnapshot(s) {
-        return structuredClone({ g1: s.g1, g2: s.g2, hidden: s.hidden, sets: s.sets });
+        return structuredClone({ g1: s.g1, g2: s.g2, hidden: s.hidden });
     }
 
-    // 오랫동안 감지되지 않은(삭제/비활성화된 확장) 버튼 키 목록 — Clean Up 대상
+    // '편집 메뉴에서 뺀 아이콘'으로 켜져 있는 키인가? (챗이 열려 있지 않아도 Clean Up 대상이 되지 않게)
+    const extKeyOn = (s, k) => Object.keys(EDIT_DEFS).some((nk) => s.editExtract[nk] && extKeyOf(nk) === k);
+
+    // 지금 챗에서 감지되지 않은 버튼 키 — Clean Up 대상 (삭제/비활성화된 확장의 버튼 등)
     function staleKeys(s) {
-        return Object.keys(s.known).filter((k) => !isInSet(s, k) && !isShown(s, k));
+        return Object.keys(s.known).filter((k) => !isPaired(k) && !liveKeys.has(k) && !extKeyOn(s, k));
     }
 
     /* ---------- 버튼 탐색 / 식별 ---------- */
@@ -473,72 +384,28 @@
 
     const getLabel = (el, key) => el.getAttribute('title') || el.getAttribute('data-title') || key;
 
-    const dompurify = () => (SillyTavern.libs && SillyTavern.libs.DOMPurify) || null;
-
-    // DOMPurify가 없을 때: 자식 없이 class/title만 가진 안전한 껍데기
-    function minimalHtml(el) {
-        const c = document.createElement('div');
-        c.className = [...el.classList].filter((x) => !x.startsWith('mam-') && x !== 'displayNone' && x !== 'hidden').join(' ');
-        const t = el.getAttribute('title');
-        if (t) c.title = t;
-        return c.outerHTML;
-    }
-
-    // 설정에 저장할 아이콘 HTML (다른 확장의 DOM이므로 반드시 sanitize)
+    // 설정에 저장할 아이콘 HTML (화면에 넣을 때 iconHtml에서 sanitize)
     function snapshot(el) {
         const c = el.cloneNode(true);
-        c.classList.remove('mam-hidden', 'mam-dup', 'mam-keep', 'displayNone', 'hidden');
+        c.classList.remove('mam-hidden', 'mam-dup', 'displayNone', 'hidden');
         c.removeAttribute('style');
         c.removeAttribute('id');
         c.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
-        const DP = dompurify();
-        return DP ? DP.sanitize(c.outerHTML) : minimalHtml(el);
+        return c.outerHTML;
     }
 
-    // 저장된 HTML을 화면에 넣을 때도 한 번 더 sanitize (settings.json이 변조/공유돼도 안전하도록). 결과는 캐시.
-    const cleanCache = new Map();
+    // 다른 확장의 DOM이 담긴 저장값이므로 화면에 넣을 때 반드시 sanitize (settings.json이 변조/공유돼도 안전하도록)
     function iconHtml(html) {
-        if (!html) return '';
-        let out = cleanCache.get(html);
-        if (out === undefined) {
-            const DP = dompurify();
-            out = DP ? DP.sanitize(html) : '';
-            cleanCache.set(html, out);
-        }
-        return out;
+        const DP = SillyTavern.libs && SillyTavern.libs.DOMPurify;
+        return html && DP ? DP.sanitize(html) : '';
     }
 
-    // 템플릿(원래 DOM 순서) 기준으로 새 버튼을 이웃 버튼 옆에 끼워 넣는다.
-    // 다른 확장이 나중에 버튼을 추가해도 원래 위치에 들어가고, 사용자가 옮긴 순서는 건드리지 않는다.
-    // 실제 메시지(아직 이 확장이 재배치하지 않은 원본 DOM)에서 본 순서를 s.native에 누적한다.
-    function mergeNative(s, rawKeys) {
-        const keys = [...new Set(rawKeys)];
-        let changed = false;
-        for (let i = 0; i < keys.length; i++) {
-            if (s.native.includes(keys[i])) continue;
-            let at = -1;
-            for (let j = i - 1; j >= 0 && at < 0; j--) {
-                const p = s.native.indexOf(keys[j]);
-                if (p >= 0) at = p + 1;
-            }
-            for (let j = i + 1; j < keys.length && at < 0; j++) {
-                const n = s.native.indexOf(keys[j]);
-                if (n >= 0) at = n;
-            }
-            if (at < 0) at = s.native.length;
-            s.native.splice(at, 0, keys[i]);
-            changed = true;
-        }
-        return changed;
-    }
-
-    // 새로 감지된 버튼은 (이미 정해진 순서가 없으므로) 항상 보이는 그룹(g1)의 맨 뒤로.
+    // 새로 감지된 버튼: 처음 본 순서를 native에 누적(Reset 기본 순서용)하고, 그룹1 맨 뒤로 보낸다.
     // 다른 확장이 DOM 앞쪽에 끼워 넣거나 더보기 쪽 이웃 옆에 있어도 영향받지 않는다.
     function placeKey(s, key) {
-        mergeNative(s, [key]);
-        if (leaderOf(s, key) !== key) return; // 이미 세트의 멤버면 대표키가 자리를 가짐
-        if (s.g1.includes(key) || s.g2.includes(key)) return;
-        s.g1.push(key);
+        if (!s.native.includes(key)) s.native.push(key);
+        const lead = leaderOf(key);
+        if (!s.g1.includes(lead) && !s.g2.includes(lead)) s.g1.push(lead);
     }
 
     // 실리태번 원래 순서(템플릿 DOM 순서) 목록
@@ -555,38 +422,26 @@
     function register(els) {
         const s = settings();
         let changed = false;
-        const now = Date.now();
         for (const el of els) {
             const key = getKey(el);
-            const firstLive = !liveKeys.has(key);
-            if (firstLive) { liveKeys.add(key); uiDirty = true; }
+            if (!liveKeys.has(key)) { liveKeys.add(key); uiDirty = true; }
             const rec = s.known[key];
             if (!rec) {
-                if (capWarned) continue; // 상한 도달: 기록은 안 하지만 버튼은 그대로 보임(그룹1 맨 뒤)
-                if (Object.keys(s.known).length >= MAX_KNOWN) {
-                    capWarned = true;
-                    console.warn(`[${TITLE}] Too many distinct icons (>${MAX_KNOWN}); new ones are shown but not recorded.`);
-                    continue;
-                }
-                s.known[key] = { label: getLabel(el, key), html: snapshot(el), seen: now };
-                placeKey(s, key); // 새 버튼은 원래 순서 위치의 그룹1/2 이웃 옆으로
+                s.known[key] = { label: getLabel(el, key), html: snapshot(el) };
+                placeKey(s, key);
                 refreshedKeys.add(key);
                 changed = true;
-            } else {
-                // 감지 시각은 하루에 한 번만 갱신 (저장 반복 방지)
-                if (firstLive && now - (rec.seen || 0) > DAY_MS) { rec.seen = now; changed = true; }
-                if (!refreshedKeys.has(key)) {
-                    // 이미 저장된 버튼도, 지금 실제로 보이는 아이콘으로 한 번 갱신
-                    // (다른 확장이 아이콘을 바꿨을 때 설정 화면에 옛 아이콘이 남는 문제 방지)
-                    refreshedKeys.add(key);
-                    const html = snapshot(el);
-                    const label = getLabel(el, key);
-                    if (rec.html !== html || rec.label !== label) {
-                        rec.html = html;
-                        rec.label = label;
-                        uiDirty = true;
-                        changed = true;
-                    }
+            } else if (!refreshedKeys.has(key)) {
+                // 이미 저장된 버튼도, 지금 실제로 보이는 아이콘으로 한 번 갱신
+                // (다른 확장이 아이콘을 바꿨을 때 설정 화면에 옛 아이콘이 남는 문제 방지)
+                refreshedKeys.add(key);
+                const html = snapshot(el);
+                const label = getLabel(el, key);
+                if (rec.html !== html || rec.label !== label) {
+                    rec.html = html;
+                    rec.label = label;
+                    uiDirty = true;
+                    changed = true;
                 }
             }
         }
@@ -625,7 +480,7 @@
         return { g1, g2, toggle };
     }
 
-    function applyTo(mes, s, hiddenSet, leaders = leaderMapOf(s)) {
+    function applyTo(mes, s, hiddenSet) {
         const mb = mes.querySelector('.mes_buttons');
         if (!mb) return;
         const { g1, g2, toggle } = ensureGroups(mb);
@@ -635,7 +490,7 @@
         const seen = new Set();
         for (const b of getButtons(mes)) {
             const k = getKey(b);
-            b.classList.toggle('mam-hidden', hiddenSet.has(leaders.get(k) ?? k));
+            b.classList.toggle('mam-hidden', hiddenSet.has(leaderOf(k)));
             // 다른 확장이 같은 버튼을 두 번 넣은 경우(템플릿 복제 + 직접 추가 등): 첫 번째만 남기고 숨김
             const sig = sigOf(b, k);
             b.classList.toggle('mam-dup', seen.has(sig));
@@ -644,15 +499,10 @@
             byKey.get(k).push(b);
         }
 
-        // 아이콘이 아닌 직계 자식(카운터 등 다른 확장의 요소)은 숨기지 않고 제자리에 둔다
-        for (const c of mb.children) {
-            if (!c.classList.contains('mes_button') && !c.matches(NOT_BUTTON)) c.classList.add('mam-keep');
-        }
-
         const take = (keys) => {
             const out = [];
             for (const lead of keys) {
-                for (const k of s.sets[lead] || [lead]) {
+                for (const k of PAIRS[lead] || [lead]) {
                     const arr = byKey.get(k);
                     if (arr) { out.push(...arr); byKey.delete(k); }
                 }
@@ -674,8 +524,7 @@
     function applyAll() {
         const s = settings();
         const hidden = new Set(s.hidden);
-        const leaders = leaderMapOf(s);
-        document.querySelectorAll('#chat .mes').forEach((mes) => applyTo(mes, s, hidden, leaders));
+        document.querySelectorAll('#chat .mes').forEach((mes) => applyTo(mes, s, hidden));
     }
 
     /* ---------- 변경 감시 ---------- */
@@ -703,64 +552,36 @@
         queueMicrotask(() => { raf = 0; flush(); });
     }
 
-    let failures = 0;
-
-    // 문제가 생기면 이 확장이 건 숨김 규칙을 풀어서 ST 기본 버튼이 그대로 보이게 되돌린다
+    // 시작 실패 시: 이 확장이 건 숨김 규칙을 풀어서 ST 기본 버튼이 그대로 보이게 되돌린다
     function rollback() {
         observer.disconnect();
         document.querySelectorAll('.mes_buttons.mam-ready').forEach((el) => el.classList.remove('mam-ready'));
     }
 
-    function fail(err, where) {
-        console.error(`[${TITLE}] ${where} failed`, err);
-        if (++failures < 3) return;
-        rollback();
-        toastr.error('Too many errors; switched off for this session. See the browser console.', TITLE);
-    }
-
     function flush() {
-        try { flushInner(); } catch (err) { fail(err, 'flush'); }
+        try { flushInner(); } catch (err) { console.error(`[${TITLE}] flush failed`, err); }
     }
 
     function flushInner() {
         const nodes = [...pending];
         pending.clear();
 
-        const s0 = settings();
         let changed = false;
-
-        // 원본 순서 수집: 템플릿(변경됐을 때만)과, 아직 재배치되지 않은 메시지의 DOM 순서
+        // 템플릿은 바뀌었을 때만 읽는다 (원래 순서 수집 겸 버튼 등록)
         if (tplDirty) {
             tplDirty = false;
-            const tplEl = document.getElementById('message_template');
-            const tplButtons = getButtons(tplEl);
-            if (tplEl) changed = mergeNative(s0, tplButtons.map(getKey)) || changed;
-            changed = register(tplButtons) || changed;
+            changed = register(getButtons(document.getElementById('message_template'))) || changed;
         }
+        for (const n of nodes) changed = register(getButtons(n)) || changed;
 
-        // 노드당 getButtons는 한 번만
-        const found = nodes.map((n) => [n, getButtons(n)]);
-        for (const [n, btns] of found) {
-            const mb = n.querySelector('.mes_buttons');
-            if (mb && !mb.querySelector(':scope > .mam-group1')) {
-                changed = mergeNative(s0, btns.map(getKey)) || changed;
-            }
-        }
-        for (const [, btns] of found) changed = register(btns) || changed;
-
-        const s = changed ? settings() : s0;
-        if (seedSets(s)) changed = true;
-
+        const s = settings();
         const hidden = new Set(s.hidden);
-        const leaders = leaderMapOf(s);
-        let ok = true;
         for (const n of nodes) {
             try {
-                applyTo(n, s, hidden, leaders);
+                applyTo(n, s, hidden);
             } catch (err) {
-                ok = false;
+                console.error(`[${TITLE}] applyTo failed`, err);
                 n.querySelector('.mes_buttons')?.classList.remove('mam-ready'); // 이 메시지는 ST 기본 표시로 되돌림
-                fail(err, 'applyTo');
             }
         }
 
@@ -769,7 +590,6 @@
             uiDirty = false;
             renderManager();
         }
-        if (ok) failures = 0;
     }
 
     // 이 확장이 관심 있는 변화: 새 .mes 추가, 메시지 헤더(.mes_buttons 등) 변경, 템플릿 변경.
@@ -805,11 +625,10 @@
                     <div class="mam-toolbar">
                         <div class="menu_button menu_button_icon interactable" id="mam_show_all" role="button" tabindex="0" title="Show all icons"><i class="fa-solid fa-eye"></i><span>Show All</span></div>
                         <div class="menu_button menu_button_icon interactable" id="mam_hide_all" role="button" tabindex="0" title="Hide all icons"><i class="fa-solid fa-eye-slash"></i><span>Hide All</span></div>
-                        <div class="menu_button menu_button_icon interactable" id="mam_cleanup" role="button" tabindex="0" title="Remove records of icons not seen for 14+ days (e.g. from uninstalled extensions)"><i class="fa-solid fa-broom"></i><span>Clean Up</span></div>
+                        <div class="menu_button menu_button_icon interactable" id="mam_cleanup" role="button" tabindex="0" title="Remove records of icons not present in the current chat (e.g. from uninstalled extensions)"><i class="fa-solid fa-broom"></i><span>Clean Up</span></div>
                         <div class="menu_button menu_button_icon interactable" id="mam_save" role="button" tabindex="0" title="Save the current layout. Reset will return to this layout."><i class="fa-solid fa-floppy-disk"></i><span>Save</span></div>
                         <div class="menu_button menu_button_icon interactable" id="mam_reset" role="button" tabindex="0" title="Reset to the saved layout (or the default)"><i class="fa-solid fa-rotate-left"></i><span>Reset</span></div>
                     </div>
-                    <small id="mam_dormant" class="mam-desc mam-dormant" style="display:none"></small>
 
                     <fieldset class="mam-box">
                         <legend><i class="fa-solid fa-grip"></i>Preview</legend>
@@ -869,10 +688,12 @@
                         </div>
                         <small class="mam-desc mam-hint">Click to expand: shadows, icon overflow behavior, and More group position.</small>
                     </fieldset>
-
+                </div>
+            </div>
         </div>`;
         $('#extensions_settings2').append(html);
         initPreviewDrag();
+        renderEditOptions();
 
         // 접이식 박스: 제목 또는 안내 문구를 누르면 펼침/접힘 (Enter / Space 도 지원)
         $('.mam-settings .mam-collapsible').each(function () {
@@ -891,29 +712,18 @@
             box.querySelector('.mam-hint')?.addEventListener('click', toggle);
         });
 
-        $('#mam_no_shadow')
-            .prop('checked', !!settings().noShadow)
-            .on('change', function () {
-                settings().noShadow = this.checked;
-                applyShadowSetting();
-                save();
-            });
-
-        $('#mam_scroll')
-            .prop('checked', !!settings().scrollActions)
-            .on('change', function () {
-                settings().scrollActions = this.checked;
-                applyScrollSetting();
-                save();
-            });
-
-        $('#mam_more_right')
-            .prop('checked', !!settings().moreRight)
-            .on('change', function () {
-                settings().moreRight = this.checked;
-                applyMoreSetting();
-                save();
-            });
+        const bindFlag = (sel, field) => {
+            $(sel)
+                .prop('checked', !!settings()[field])
+                .on('change', function () {
+                    settings()[field] = this.checked;
+                    applyBodyFlags();
+                    save();
+                });
+        };
+        bindFlag('#mam_no_shadow', 'noShadow');
+        bindFlag('#mam_scroll', 'scrollActions');
+        bindFlag('#mam_more_right', 'moreRight');
 
         $('#mam_show_all').on('click', () => {
             settings().hidden = [];
@@ -933,17 +743,16 @@
         $('#mam_cleanup').on('click', async () => {
             const s = settings();
             const stale = staleKeys(s);
-            if (!stale.length) { toastr.info('Nothing to clean up. Only icons not seen for 14+ days are removed.'); return; }
+            if (!stale.length) { toastr.info('Nothing to clean up.'); return; }
             const names = stale.map((k) => s.known[k].label || k).join(', ');
-            if (!(await askConfirm(`Remove ${stale.length} icon record(s)?`, `${names}\n\n(They are detected again if the extension comes back.)`, 'Remove'))) return;
+            if (!(await askConfirm(`Remove ${stale.length} icon record(s)?`, `${names}\n\n(They are detected again if they show up in a chat.)`, 'Remove'))) return;
             stale.forEach((k) => removeKey(s, k));
-            capWarned = false;
             save();
             applyAll();
             renderManager();
         });
 
-        // 현재 배치(그룹1/2 순서, 숨김, 세트)를 Reset 기준점으로 저장
+        // 현재 배치(그룹1/2 순서, 숨김)를 Reset 기준점으로 저장
         $('#mam_save').on('click', () => {
             const s = settings();
             s.saved = layoutSnapshot(s);
@@ -960,13 +769,9 @@
                 s.g1 = [...s.saved.g1];
                 s.g2 = [...s.saved.g2];
                 s.hidden = [...s.saved.hidden];
-                s.sets = structuredClone(s.saved.sets);
-                // 저장 이후 새로 설치된 확장의 버튼은 settings()가 그룹1 맨 뒤에 자동 배치
-                seedSets(s);
-                settings();
+                settings(); // 저장 이후 새로 설치된 확장의 버튼은 그룹1 맨 뒤에 자동 배치
             } else {
-                const members = nonLeaderMembers(s);
-                s.g1 = originalOrder(s).filter((k) => !members.has(k));
+                s.g1 = [...new Set(originalOrder(s).map(leaderOf))];
                 s.g2 = [];
                 s.hidden = [];
             }
@@ -988,11 +793,11 @@
 
         const fill = (pv, keys) => {
             for (const key of keys) {
-                if (!s.known[key] || hidden.has(key) || !isShown(s, key)) continue;
+                if (!s.known[key] || hidden.has(key)) continue;
                 pv.append(
                     $('<span class="mam-pv-item">')
                         .attr('data-key', key)
-                        .attr('title', (s.sets[key] || [key]).map((m) => (s.known[m] ? s.known[m].label : m)).join(' / '))
+                        .attr('title', (PAIRS[key] || [key]).map((m) => (s.known[m] ? s.known[m].label : m)).join(' / '))
                         .append($('<span>').html(iconHtml(s.known[key].html))),
                 );
             }
@@ -1184,7 +989,7 @@
         const hidden = new Set(s.hidden);
         const read = (sel) => $(`${sel} .mam-pv-item`).map((_, el) => $(el).attr('data-key')).get();
 
-        const keep = (k) => hidden.has(k) || !isShown(s, k);
+        const keep = (k) => hidden.has(k) || !s.known[k];
 
         const oldG1 = [...s.g1];
         const oldG2 = [...s.g2];
@@ -1199,29 +1004,30 @@
     function commitOrder() {
         const s = settings();
         const rows = (sel) => $(`${sel} .mam-row`).map((_, el) => $(el).attr('data-key')).get();
-        const dormant = (k) => !isShown(s, k);
-        s.g1 = mergeKeep(s.g1, rows('#mam_g1'), dormant);
-        s.g2 = mergeKeep(s.g2, rows('#mam_g2'), dormant);
+        const unknown = (k) => !s.known[k];
+        s.g1 = mergeKeep(s.g1, rows('#mam_g1'), unknown);
+        s.g2 = mergeKeep(s.g2, rows('#mam_g2'), unknown);
         save();
         applyAll();
         renderPreview();
     }
 
-    function makeRow(key, info, hidden, sArg) {
+    function makeRow(key, info, hidden, s) {
         const row = $('<div class="mam-row">').attr('data-key', key);
         row.toggleClass('mam-off', hidden.has(key));
 
-        const st0 = sArg || settings();
-        const members = st0.sets[key];
-        // 지금 챗에는 없지만 최근에 본 버튼(조건부 버튼 등)은 살짝 흐리게 표시
-        if (!(members || [key]).some((m) => liveKeys.has(m))) row.addClass('mam-absent').attr('title', 'Not present in the current chat');
+        // 쌍(hide/unhide 등)이면 멤버 아이콘을 모두 표시
+        const members = (PAIRS[key] || []).filter((m) => s.known[m]);
+        const isSet = members.length > 1;
+        // 지금 챗에는 없는 버튼(조건부 버튼 등)은 살짝 흐리게 표시
+        if (!(PAIRS[key] || [key]).some((m) => liveKeys.has(m))) row.addClass('mam-absent').attr('title', 'Not present in the current chat');
 
         const handle = $('<i class="fa-solid fa-grip-vertical mam-handle"></i>');
         const icon = $('<span class="mam-icon">');
         const name = $('<span class="mam-name">');
-        if (members) {
-            icon.addClass('mam-icon-set').html(members.map((m) => (st0.known[m] ? iconHtml(st0.known[m].html) : '')).join(''));
-            name.append($('<span>').text(members.map((m) => (st0.known[m] ? st0.known[m].label : m)).join(' / ')));
+        if (isSet) {
+            icon.addClass('mam-icon-set').html(members.map((m) => iconHtml(s.known[m].html)).join(''));
+            name.append($('<span>').text(members.map((m) => s.known[m].label).join(' / ')));
             name.append($('<small>').text(members.join(' + ')));
         } else {
             icon.html(iconHtml(info.html));
@@ -1251,8 +1057,6 @@
 
     function renderManager() {
         if (!$('#mam_g1').length) return;
-        discoverEditDefs();
-        if ($('#mam_edit_opts .mam-edit-opt').length !== Object.keys(EDIT_DEFS).length) renderEditOptions();
         renderLists();
         renderPreview();
     }
@@ -1266,15 +1070,9 @@
         for (const [sel, keys] of [['#mam_g1', s.g1], ['#mam_g2', s.g2]]) {
             const list = $(sel).empty();
             for (const key of keys) {
-                if (s.known[key] && isShown(s, key)) list.append(makeRow(key, s.known[key], hidden, s));
+                if (s.known[key]) list.append(makeRow(key, s.known[key], hidden, s));
             }
         }
-
-        // 삭제·비활성화된 확장의 버튼은 목록에서 자동으로 숨김 (기록은 유지 → 다시 켜면 원래 자리로 복귀)
-        const dormant = [...s.g1, ...s.g2].filter((k) => s.known[k] && !isShown(s, k));
-        $('#mam_dormant')
-            .toggle(dormant.length > 0)
-            .text(`${dormant.length} icon(s) have not been seen for 14+ days and are hidden here. They reappear in their original spot if the extension comes back. Use 'Clean Up' to delete their records.`);
 
         if ($.fn.sortable) {
             $('#mam_g1, #mam_g2').sortable({
@@ -1291,9 +1089,7 @@
 
     function init() {
         migrate();
-        applyShadowSetting();
-        applyScrollSetting();
-        applyMoreSetting();
+        applyBodyFlags();
         buildUI();
 
         // 편집 메뉴에서 빼낸 독립 아이콘
@@ -1334,10 +1130,6 @@
     }
 
     jQuery(() => {
-        if (!supported()) {
-            console.warn(`[${TITLE}] This SillyTavern version is not supported. The extension stays idle and changes nothing.`);
-            return;
-        }
         try {
             init();
         } catch (err) {
