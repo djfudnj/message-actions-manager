@@ -8,7 +8,8 @@
 
     const MODULE = 'message_actions_manager';
     // sets: { 대표키: [멤버키...] } — 같은 자리를 번갈아 쓰는 버튼 묶음. 그룹 목록/숨김 목록에는 대표키만 들어간다.
-    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {}, noShadow: true, scrollActions: false };
+    // saved: Save 버튼으로 저장한 배치 { g1, g2, hidden, sets } (없으면 null). Reset 시 이 상태로 복원.
+    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {}, noShadow: true, scrollActions: true, moreRight: true, editExtract: {}, saved: null };
 
     // 항상 세트로 묶여 있는 쌍 (사용자가 풀 수 없음)
     const DEFAULT_SETS = [
@@ -24,6 +25,7 @@
 
     const liveKeys = new Set();
     let uiDirty = false;
+    let dormantNotified = false;
     const ctx = () => SillyTavern.getContext();
 
     function settings() {
@@ -38,9 +40,18 @@
             if (!s.g1.length && !s.g2.length) s.g1 = s.order.filter((k) => s.known[k]);
             delete s.order;
         }
-        // 어느 그룹에도 없는 버튼은 그룹1로
+        // 어느 그룹에도 없는 버튼은 그룹1로 (저장 이후 새로 설치된 확장의 버튼도 여기서 그룹1 맨 뒤로 들어감)
         const placed = new Set([...s.g1, ...s.g2, ...nonLeaderMembers(s)]);
         for (const k of Object.keys(s.known)) if (!placed.has(k)) s.g1.push(k);
+        // 직전 버전의 단일 옵션(extractEdit) -> 버튼별 옵션(editExtract)
+        if (s.extractEdit !== undefined) {
+            if (s.extractEdit && !Object.keys(s.editExtract).length) {
+                s.editExtract = { mes_edit_copy: true, mes_edit_delete: true };
+            } else {
+                for (const k of ['mes_ext_edit_copy', 'mes_ext_edit_delete']) removeKey(s, k);
+            }
+            delete s.extractEdit;
+        }
         // 예전 버전의 '묶음 풀기' 기록은 더 이상 쓰지 않음
         if (s.ignored !== undefined) delete s.ignored;
         return s;
@@ -57,6 +68,213 @@
     const applyScrollSetting = () => {
         document.body.classList.toggle('mam-scroll', !!settings().scrollActions);
     };
+
+    // More(…) 그룹 위치: 켬 = 오른쪽(기본), 끔 = 왼쪽 (CSS order로 처리, body 클래스로 토글)
+    const applyMoreSetting = () => {
+        document.body.classList.toggle('mam-more-left', !settings().moreRight);
+    };
+
+    /* ---------- 편집 메뉴(.mes_edit_buttons)의 버튼을 독립 아이콘으로 빼기 ----------
+     * ST 원본 .mes_edit_* 핸들러는 '편집 중인 메시지'(this_edit_mes_id)를 전제로 동작한다.
+     * 그래서 클릭하면 → 편집 모드 진입 → 원본 버튼 클릭(ST 확인 팝업 그대로) → 아직 편집 중이면 취소 로 처리한다.
+     * (keepEditing: 편집 모드가 계속 필요한 버튼은 취소하지 않음)
+     */
+    const EDIT_SKIP = new Set(['mes_edit_done', 'mes_edit_cancel']);
+    const EDIT_DEFS = {
+        mes_edit_copy: { icon: 'fa-clone', title: 'Copy this message' },
+        mes_edit_add_reasoning: { icon: 'fa-lightbulb', title: 'Add reasoning block', keepEditing: true },
+        mes_edit_delete: { icon: 'fa-trash-can', title: 'Delete this message' },
+        mes_edit_up: { icon: 'fa-chevron-up', title: 'Move message up', quiet: true },
+        mes_edit_down: { icon: 'fa-chevron-down', title: 'Move message down', quiet: true },
+    };
+    const extKeyOf = (nk) => 'mes_x_' + nk.replace(/^mes_/, ''); // mes_edit_copy -> mes_x_edit_copy
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const busyMes = new WeakSet();
+    const isEditing = (mes) => !!mes.querySelector('.edit_textarea');
+
+    // 이 ST 버전에만 있는 편집 버튼(알려진 목록 밖)도 DOM에서 찾아 목록에 추가
+    function discoverEditDefs() {
+        for (const el of document.querySelectorAll('.mes_edit_buttons > *')) {
+            const classes = [...el.classList];
+            const nk = classes.find((c) => c.startsWith('mes_edit_') && !EDIT_SKIP.has(c));
+            if (!nk || EDIT_DEFS[nk]) continue;
+            const icon = classes.find((c) => c.startsWith('fa-') && !['fa-solid', 'fa-regular', 'fa-brands', 'fa-fw'].includes(c)) || 'fa-circle';
+            EDIT_DEFS[nk] = { icon, title: el.getAttribute('title') || nk };
+        }
+    }
+
+    // 챗 안에 남은 편집 모드를 확실히 닫는다: 취소 → (안 닫히면) 확인 순으로 재시도하며 실제로 닫혔는지 검사.
+    // 이동 직후엔 메시지 번호/요소가 바뀌므로 매번 챗에서 편집창을 새로 찾는다.
+    const editingMes = () => document.querySelector('#chat .edit_textarea')?.closest('.mes') || null;
+
+    async function exitEditMode() {
+        for (let round = 0; round < 2; round++) {
+            for (let i = 0; i < 12; i++) {
+                const m = editingMes();
+                if (!m) break;
+                // 앞 몇 번은 취소(변경 없음), 계속 안 닫히면 확인(내용 그대로 저장)으로 폴백
+                m.querySelector(i < 4 ? '.mes_edit_cancel' : '.mes_edit_done')?.click();
+                await sleep(150);
+            }
+            if (!editingMes()) {
+                await sleep(400); // ST가 뒤늦게 편집 상태를 되살리는 경우 대비해 한 번 더 확인
+                if (!editingMes()) return true;
+            }
+        }
+        toastr.warning('Could not close edit mode automatically.', 'Message Actions Manager');
+        return false;
+    }
+
+    // 위/아래 이동: ST가 메시지 번호를 바꾸고 저장을 끝낼 때까지 대기
+    async function waitMoveDone(mes, idBefore) {
+        for (let i = 0; i < 30 && mes.getAttribute('mesid') === idBefore; i++) await sleep(50);
+        await sleep(500);
+    }
+
+    // 'quiet' 버튼(위/아래 이동): 내부적으로 편집 모드를 거치는 동안 편집창이 화면에 보이지 않게 한다.
+    // 편집 진입 전의 본문을 복사해 둔 '화면용 사본'을 대신 보여주고(진짜 본문은 숨김), 끝나면 사본을 지운다.
+    let quietHtml = null;
+    let quietCls = '';
+
+    function quietStart(mes) {
+        const mt = mes.querySelector('.mes_text');
+        quietHtml = mt ? mt.innerHTML : null;
+        quietCls = mt ? mt.className : '';
+        document.body.classList.add('mam-quiet-edit'); // 편집창/편집 버튼 숨김 (CSS)
+    }
+
+    // 편집창이 생긴 직후: 그 본문 영역을 숨기고 같은 자리에 사본을 둔다 (같은 작업 안에서 처리 → 깜빡임 없음)
+    function quietCover(mes) {
+        const real = mes.querySelector('.edit_textarea')?.closest('.mes_text');
+        if (!real || quietHtml === null) return;
+        const g = document.createElement('div');
+        g.className = quietCls + ' mam-ghost-text';
+        g.innerHTML = quietHtml;
+        g.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+        g.querySelectorAll('video, audio, iframe, script').forEach((n) => n.remove());
+        real.after(g);
+        real.dataset.mamLock = '1';
+    }
+
+    function quietEnd() {
+        document.querySelectorAll('#chat .mam-ghost-text').forEach((g) => g.remove());
+        document.querySelectorAll('#chat .mes_text[data-mam-lock]').forEach((el) => delete el.dataset.mamLock);
+        document.body.classList.remove('mam-quiet-edit');
+        quietHtml = null;
+    }
+
+    // 삭제는 편집 모드 없이도 가능: ST의 /cut 슬래시 명령을 직접 쓴다 (확인 팝업은 직접 띄움).
+    // 처리했으면 true, 쓸 수 없는 환경이면 false(→ 편집 모드 경유 방식으로 폴백)
+    async function deleteMessageDirect(mes) {
+        const id = Number(mes.getAttribute('mesid'));
+        const { callGenericPopup, POPUP_TYPE, POPUP_RESULT, executeSlashCommandsWithOptions } = ctx();
+        if (!Number.isInteger(id) || !executeSlashCommandsWithOptions) return false;
+        let ok;
+        if (callGenericPopup && POPUP_TYPE) {
+            const r = await callGenericPopup(`<h3>Delete this message?</h3><div>#${id}</div>`, POPUP_TYPE.CONFIRM, '', {
+                okButton: 'Delete',
+                cancelButton: 'Cancel',
+                defaultResult: POPUP_RESULT?.NEGATIVE ?? 0, // Enter 기본값은 Cancel
+            });
+            ok = POPUP_RESULT ? r === POPUP_RESULT.AFFIRMATIVE : r === true;
+        } else {
+            ok = window.confirm('Delete this message?');
+        }
+        if (!ok) return true;
+        // 팝업 도중 채팅이 바뀌었거나 인덱스가 밀렸으면 중단
+        if (!mes.isConnected || Number(mes.getAttribute('mesid')) !== id) return true;
+        await executeSlashCommandsWithOptions(`/cut ${id}`);
+        return true;
+    }
+
+    async function runEditAction(mes, nk) {
+        if (busyMes.has(mes)) return;
+        busyMes.add(mes);
+        try {
+            if (nk === 'mes_edit_delete' && await deleteMessageDirect(mes)) return;
+            const def = EDIT_DEFS[nk] || {};
+            const wasEditing = isEditing(mes);
+            const quiet = !!def.quiet && !wasEditing;
+            if (quiet) quietStart(mes);
+            if (!wasEditing) {
+                mes.querySelector('.mes_edit')?.click();
+                for (let i = 0; i < 100 && !isEditing(mes); i++) await sleep(10);
+                if (!isEditing(mes)) { toastr.error('Could not enter edit mode.', 'Message Actions Manager'); return; }
+                if (quiet) quietCover(mes);
+            }
+            const btn = mes.querySelector('.' + nk);
+            if (!btn) {
+                toastr.error('Original edit button not found.', 'Message Actions Manager');
+                if (!wasEditing) mes.querySelector('.mes_edit_cancel')?.click();
+                return;
+            }
+            const idBefore = mes.getAttribute('mesid');
+            btn.click();
+            // ST 확인 팝업이 닫힐 때까지 대기 (최대 60초)
+            await sleep(150);
+            for (let i = 0; i < 600 && document.querySelector('dialog.popup[open]'); i++) await sleep(100);
+            if (nk === 'mes_edit_up' || nk === 'mes_edit_down') await waitMoveDone(mes, idBefore);
+            else await sleep(150);
+            // 우리가 연 편집 모드가 남아 있으면(삭제 취소, 복제/이동 후 등) 원래 상태로 되돌림
+            if (!wasEditing && !def.keepEditing) await exitEditMode();
+        } finally {
+            quietEnd();
+            busyMes.delete(mes);
+        }
+    }
+
+    function makeExtButton(nk, def) {
+        const el = document.createElement('div');
+        el.className = `mes_button ${extKeyOf(nk)} mam-x fa-solid ${def.icon} interactable`;
+        el.title = def.title;
+        el.dataset.mamNative = nk;
+        el.tabIndex = 0;
+        return el;
+    }
+
+    // 켜진 버튼만 각 메시지에 삽입 / 꺼진 버튼은 제거
+    function syncExtButtons(mb, g1, s) {
+        for (const [nk, def] of Object.entries(EDIT_DEFS)) {
+            const exist = mb.querySelector(`.${extKeyOf(nk)}`);
+            const on = !!s.editExtract[nk];
+            if (on && !exist) g1.appendChild(makeExtButton(nk, def));
+            else if (!on && exist) exist.remove();
+        }
+    }
+
+    function setExtract(nk, on) {
+        const s = settings();
+        s.editExtract[nk] = on;
+        if (!on) {
+            const ek = extKeyOf(nk);
+            liveKeys.delete(ek);
+            refreshedKeys.delete(ek);
+            removeKey(s, ek);
+        }
+        save();
+        applyAll();
+        renderManager();
+    }
+
+    function renderEditOptions() {
+        const box = $('#mam_edit_opts');
+        if (!box.length) return;
+        const s = settings();
+        box.empty();
+        for (const [nk, d] of Object.entries(EDIT_DEFS)) {
+            const id = 'mam_ex_' + nk;
+            const cb = $('<input type="checkbox">').attr('id', id).prop('checked', !!s.editExtract[nk]);
+            cb.on('change', function () { setExtract(nk, this.checked); });
+            const label = $('<label class="mam-opt mam-edit-opt">').attr('for', id).append(
+                $('<span class="mam-opt-title">').append(
+                    $('<i class="fa-solid mam-edit-ico">').addClass(d.icon),
+                    $('<span class="mam-opt-text">').append($('<span>').text(d.title), $('<small>').text(nk)),
+                ),
+                $('<span class="mam-switch">').append(cb, $('<span class="mam-slider">')),
+            );
+            box.append($('<div class="mam-item">').append(label));
+        }
+    }
 
     /* ---------- 세트(번갈아 보이는 버튼 묶음) ---------- */
 
@@ -138,14 +356,43 @@
         return out;
     }
 
-    // 목록/설정에서 버튼 기록을 완전히 제거 (세트는 건드리지 않음)
+    // 목록/설정에서 버튼 기록을 완전히 제거 (세트는 건드리지 않음). 저장된 배치(saved)에서도 함께 제거.
     function removeKey(s, k) {
         if (isInSet(s, k)) return;
         s.g1 = s.g1.filter((x) => x !== k);
         s.g2 = s.g2.filter((x) => x !== k);
         s.hidden = s.hidden.filter((x) => x !== k);
         s.native = s.native.filter((x) => x !== k);
+        if (s.saved) {
+            s.saved.g1 = s.saved.g1.filter((x) => x !== k);
+            s.saved.g2 = s.saved.g2.filter((x) => x !== k);
+            s.saved.hidden = s.saved.hidden.filter((x) => x !== k);
+        }
         delete s.known[k];
+    }
+
+    // 현재 배치를 저장용 스냅샷으로
+    function layoutSnapshot(s) {
+        return structuredClone({ g1: s.g1, g2: s.g2, hidden: s.hidden, sets: s.sets });
+    }
+
+    // 감지되지 않은(삭제/비활성화된 확장) 버튼 키 목록 — Clean Up 대상과 동일한 기준
+    function staleKeys(s) {
+        return Object.keys(s.known).filter((k) => !liveKeys.has(k) && !isInSet(s, k));
+    }
+
+    // 감지 안 된 버튼이 있으면 Clean Up 하라고 한 번(세션당) 알려줌
+    function notifyDormant() {
+        if (dormantNotified) return;
+        const s = settings();
+        const n = staleKeys(s).length;
+        if (!n) return;
+        dormantNotified = true;
+        toastr.warning(
+            `${n} icon(s) from removed/disabled extensions were not detected. Open Message Actions Manager and press 'Clean Up' to tidy the list.`,
+            'Message Actions Manager',
+            { timeOut: 10000, extendedTimeOut: 5000 },
+        );
     }
 
     /* ---------- 버튼 탐색 / 식별 ---------- */
@@ -312,6 +559,7 @@
         const mb = mes.querySelector('.mes_buttons');
         if (!mb) return;
         const { g1, g2, toggle } = ensureGroups(mb);
+        syncExtButtons(mb, g1, s);
 
         const byKey = new Map();
         const seen = new Set();
@@ -429,54 +677,93 @@
                 </div>
                 <div class="inline-drawer-content">
                     <div class="mam-toolbar">
-                        <div id="mam_show_all" class="menu_button menu_button_icon">
-                            <i class="fa-solid fa-eye"></i><span>Show All</span>
-                        </div>
-                        <div id="mam_hide_all" class="menu_button menu_button_icon">
-                            <i class="fa-solid fa-eye-slash"></i><span>Hide All</span>
-                        </div>
-                        <div id="mam_cleanup" class="menu_button menu_button_icon" title="Remove entries no longer detected (e.g. icons from uninstalled extensions)">
-                            <i class="fa-solid fa-broom"></i><span>Clean Up</span>
-                        </div>
-                        <div id="mam_reset" class="menu_button menu_button_icon">
-                            <i class="fa-solid fa-rotate-left"></i><span>Reset</span>
-                        </div>
+                        <div class="menu_button menu_button_icon interactable" id="mam_show_all" role="button" tabindex="0" title="Show all icons"><i class="fa-solid fa-eye"></i><span>Show All</span></div>
+                        <div class="menu_button menu_button_icon interactable" id="mam_hide_all" role="button" tabindex="0" title="Hide all icons"><i class="fa-solid fa-eye-slash"></i><span>Hide All</span></div>
+                        <div class="menu_button menu_button_icon interactable" id="mam_cleanup" role="button" tabindex="0" title="Remove entries no longer detected (e.g. icons from uninstalled extensions)"><i class="fa-solid fa-broom"></i><span>Clean Up</span></div>
+                        <div class="menu_button menu_button_icon interactable" id="mam_save" role="button" tabindex="0" title="Save the current layout. Reset will return to this layout."><i class="fa-solid fa-floppy-disk"></i><span>Save</span></div>
+                        <div class="menu_button menu_button_icon interactable" id="mam_reset" role="button" tabindex="0" title="Reset to the saved layout (or the default)"><i class="fa-solid fa-rotate-left"></i><span>Reset</span></div>
                     </div>
-
-                    <small id="mam_dormant" class="mam-desc" style="display:none"></small>
-
-                    <label class="checkbox_label" for="mam_no_shadow" title="Remove shadows from all message action icons">
-                        <input type="checkbox" id="mam_no_shadow">
-                        <span>Remove shadows from message action icons</span>
-                    </label>
-                    <label class="checkbox_label" for="mam_scroll" title="When there are too many icons: scroll sideways instead of wrapping to the next line">
-                        <input type="checkbox" id="mam_scroll">
-                        <span>Scroll icons sideways instead of wrapping to a new line</span>
-                    </label>
+                    <small id="mam_dormant" class="mam-desc mam-dormant" style="display:none"></small>
 
                     <fieldset class="mam-box">
-                        <legend>Preview</legend>
-                        <small class="mam-desc">Drag icons to reorder. A vertical line marks the drop position.</small>
-                        <div id="mam_preview" class="mam-preview"></div>
+                        <legend><i class="fa-solid fa-grip"></i>Preview</legend>
+                        <div class="mam-item">
+                            <small class="mam-desc">Drag icons to reorder. A vertical line marks the drop position.</small>
+                            <div id="mam_preview" class="mam-preview"></div>
+                        </div>
                     </fieldset>
 
                     <fieldset class="mam-box">
-                        <legend>Always Display</legend>
-                        <small class="mam-desc">Icons always shown in the message header. Drag the handle to reorder.</small>
-                        <div id="mam_g1" class="mam-list"></div>
+                        <legend><i class="fa-solid fa-thumbtack"></i>Always Display Group</legend>
+                        <div class="mam-item">
+                            <small class="mam-desc">Icons always shown in the message header. Drag the handle to reorder.</small>
+                            <div id="mam_g1" class="mam-list"></div>
+                        </div>
                     </fieldset>
 
                     <fieldset class="mam-box">
-                        <legend>More</legend>
-                        <small class="mam-desc">Icons revealed by the … button. Drag the handle to move them between groups.</small>
-                        <div id="mam_g2" class="mam-list"></div>
+                        <legend><i class="fa-solid fa-ellipsis"></i>More Group</legend>
+                        <div class="mam-item">
+                            <small class="mam-desc">Icons revealed by the … button. Drag the handle to move them between groups.</small>
+                            <div id="mam_g2" class="mam-list"></div>
+                        </div>
                     </fieldset>
 
-                </div>
-            </div>
+                    <fieldset class="mam-box mam-collapsible mam-collapsed">
+                        <legend class="mam-toggle" tabindex="0" role="button" aria-expanded="false"><i class="fa-solid fa-pen-to-square"></i>Show Edit Buttons<i class="fa-solid fa-chevron-right mam-chevron"></i></legend>
+                        <div class="mam-item">
+                            <small class="mam-desc">Show buttons from the Edit menu as their own message icons.</small>
+                        </div>
+                        <div id="mam_edit_opts"></div>
+                        <small class="mam-desc mam-hint">Click to expand: show Edit menu buttons as message icons.</small>
+                    </fieldset>
+
+                    <fieldset class="mam-box mam-collapsible mam-collapsed">
+                        <legend class="mam-toggle" tabindex="0" role="button" aria-expanded="false"><i class="fa-solid fa-sliders"></i>Other Settings<i class="fa-solid fa-chevron-right mam-chevron"></i></legend>
+                        <div class="mam-item">
+                            <label class="mam-opt" for="mam_no_shadow">
+                                <span class="mam-opt-title">Remove shadows</span>
+                                <span class="mam-switch"><input type="checkbox" id="mam_no_shadow"><span class="mam-slider"></span></span>
+                            </label>
+                            <small class="mam-desc">Removes shadows from all message action icons.</small>
+                        </div>
+                        <div class="mam-item">
+                            <label class="mam-opt" for="mam_scroll">
+                                <span class="mam-opt-title">Scroll icons sideways</span>
+                                <span class="mam-switch"><input type="checkbox" id="mam_scroll"><span class="mam-slider"></span></span>
+                            </label>
+                            <small class="mam-desc">When there are too many icons, scroll sideways instead of wrapping to the next line.</small>
+                        </div>
+                        <div class="mam-item">
+                            <label class="mam-opt" for="mam_more_right">
+                                <span class="mam-opt-title">Show More group on the right</span>
+                                <span class="mam-switch"><input type="checkbox" id="mam_more_right"><span class="mam-slider"></span></span>
+                            </label>
+                            <small class="mam-desc">Turn off to show the … button and More icons on the left instead.</small>
+                        </div>
+                        <small class="mam-desc mam-hint">Click to expand: shadows, icon overflow behavior, and More group position.</small>
+                    </fieldset>
+
         </div>`;
         $('#extensions_settings2').append(html);
         initPreviewDrag();
+
+        // 접이식 박스: 제목 또는 안내 문구를 누르면 펼침/접힘 (Enter / Space 도 지원)
+        $('.mam-settings .mam-collapsible').each(function () {
+            const box = this;
+            const head = box.querySelector('.mam-toggle');
+            const toggle = () => {
+                const collapsed = box.classList.toggle('mam-collapsed');
+                head.setAttribute('aria-expanded', String(!collapsed));
+            };
+            head.addEventListener('click', toggle);
+            head.addEventListener('keydown', (e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                toggle();
+            });
+            box.querySelector('.mam-hint')?.addEventListener('click', toggle);
+        });
 
         $('#mam_no_shadow')
             .prop('checked', !!settings().noShadow)
@@ -491,6 +778,14 @@
             .on('change', function () {
                 settings().scrollActions = this.checked;
                 applyScrollSetting();
+                save();
+            });
+
+        $('#mam_more_right')
+            .prop('checked', !!settings().moreRight)
+            .on('change', function () {
+                settings().moreRight = this.checked;
+                applyMoreSetting();
                 save();
             });
 
@@ -511,7 +806,7 @@
 
         $('#mam_cleanup').on('click', () => {
             const s = settings();
-            const stale = Object.keys(s.known).filter((k) => !liveKeys.has(k) && !isInSet(s, k));
+            const stale = staleKeys(s);
             if (!stale.length) { toastr.info('No undetected items.'); return; }
             const names = stale.map((k) => s.known[k].label || k).join(', ');
             if (!confirm(`Remove ${stale.length} undetected item(s) from the list?\n${names}\n\n(They'll be detected again if the extension is reinstalled.)`)) return;
@@ -521,15 +816,38 @@
             renderManager();
         });
 
+        // 현재 배치(그룹1/2 순서, 숨김, 세트)를 Reset 기준점으로 저장
+        $('#mam_save').on('click', () => {
+            const s = settings();
+            s.saved = layoutSnapshot(s);
+            save();
+            renderManager();
+            toastr.success('Layout saved. Reset will return to this layout.');
+            notifyDormant();
+        });
+
+        // 저장본이 있으면 저장 상태로, 없으면 실리태번 기본 순서로 복원
         $('#mam_reset').on('click', () => {
             const s = settings();
-            const members = nonLeaderMembers(s);
-            s.g1 = originalOrder(s).filter((k) => !members.has(k));
-            s.g2 = [];
-            s.hidden = [];
+            if (s.saved) {
+                s.g1 = [...s.saved.g1];
+                s.g2 = [...s.saved.g2];
+                s.hidden = [...s.saved.hidden];
+                s.sets = structuredClone(s.saved.sets);
+                // 저장 이후 새로 설치된 확장의 버튼은 settings()가 그룹1 맨 뒤에 자동 배치
+                seedSets(s);
+                settings();
+            } else {
+                const members = nonLeaderMembers(s);
+                s.g1 = originalOrder(s).filter((k) => !members.has(k));
+                s.g2 = [];
+                s.hidden = [];
+            }
             save();
             applyAll();
             renderManager();
+            toastr.info(s.saved ? 'Restored the saved layout.' : 'Restored the default layout.');
+            notifyDormant();
         });
 
         renderManager();
@@ -748,9 +1066,9 @@
             name.append($('<small>').text(key));
         }
 
-        const toggle = $('<label class="mam-toggle">');
-        const cb = $('<input type="checkbox">').prop('checked', !hidden.has(key));
-        toggle.append(cb, $('<span>Show</span>'));
+        const toggle = $('<label class="mam-switch" title="Show">');
+        const cb = $('<input type="checkbox" aria-label="Show">').prop('checked', !hidden.has(key));
+        toggle.append(cb, $('<span class="mam-slider">'));
 
         cb.on('change', () => {
             const st = settings();
@@ -770,6 +1088,8 @@
 
     function renderManager() {
         if (!$('#mam_g1').length) return;
+        discoverEditDefs();
+        if ($('#mam_edit_opts .mam-edit-opt').length !== Object.keys(EDIT_DEFS).length) renderEditOptions();
         renderLists();
         renderPreview();
     }
@@ -810,7 +1130,20 @@
         settings();
         applyShadowSetting();
         applyScrollSetting();
+        applyMoreSetting();
         buildUI();
+
+        // 편집 메뉴에서 빼낸 독립 아이콘
+        const runExt = (el) => {
+            const mes = el.closest('.mes');
+            if (mes && el.dataset.mamNative) runEditAction(mes, el.dataset.mamNative);
+        };
+        $(document).on('click', '.mes_buttons .mam-x', function (e) { e.stopPropagation(); runExt(this); });
+        $(document).on('keydown', '.mes_buttons .mam-x', function (e) {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            e.preventDefault();
+            runExt(this);
+        });
 
         // 헤더의 … 버튼: 그룹2 펼치기/접기
         $(document).on('click', '.mam-more-toggle', function () {
@@ -833,5 +1166,8 @@
 
         document.querySelectorAll('#chat .mes').forEach((m) => pending.add(m));
         flush();
+
+        // 다른 확장의 버튼이 다 올라온 뒤에 감지 여부를 확인해 Clean Up 안내 (세션당 1회)
+        setTimeout(notifyDormant, 6000);
     });
 })();
