@@ -4,9 +4,10 @@
     display: none !important;
 }
 
-/* 기본 확장 메뉴(...)와 빈 extraMesButtons는 이 확장의 그룹으로 대체 */
-.mes_buttons .extraMesButtonsHint,
-.mes_buttons .extraMesButtons {
+/* 기본 확장 메뉴(...)와 빈 extraMesButtons는 이 확장의 그룹으로 대체.
+   단, 그룹 구성이 끝난 메시지(.mam-ready)에서만 숨긴다 → 이 확장의 JS가 실패해도 ST 기본 버튼은 그대로 보임 */
+.mes_buttons.mam-ready .extraMesButtonsHint,
+.mes_buttons.mam-ready .extraMesButtons {
     display: none !important;
 }
 
@@ -14,7 +15,7 @@
     display: contents;
 }
 
-.mes_buttons .mam-group2 {
+.mes_buttons.mam-ready .mam-group2 {
     display: none;
 }
 
@@ -52,7 +53,7 @@ body.mam-scroll .mes_buttons.mam-ready::-webkit-scrollbar {
     display: none;
 }
 
-.mes_buttons.mam-more-open .mam-group2 {
+.mes_buttons.mam-ready.mam-more-open .mam-group2 {
     display: contents;
 }
 
@@ -68,8 +69,8 @@ body.mam-scroll .mes_buttons.mam-ready::-webkit-scrollbar {
 /* 다른 확장이 편집/렌더 때마다 버튼을 그룹 밖(.mes_buttons 바로 아래)에 다시 끼워 넣으면,
    정리(mam-dup 처리)되기 전 한 프레임 동안 중복 아이콘이 깜빡이며 보인다.
    그룹 구성이 끝난 메시지에서 그룹 밖에 있는 버튼은 정리되기 전까지 숨긴다.
-   (진짜 새 버튼은 정리 시 그룹 안으로 옮겨지므로 그때부터 정상 표시됨) */
-.mes_buttons.mam-ready > *:not(.mam-group):not(.mam-more-toggle):not(.extraMesButtons):not(.extraMesButtonsHint):not(.mes_edit_buttons) {
+   (진짜 새 버튼은 정리 시 그룹 안으로 옮겨지고, 아이콘이 아닌 요소는 .mam-keep을 받아 제자리에서 정상 표시됨) */
+.mes_buttons.mam-ready > *:not(.mam-group):not(.mam-more-toggle):not(.mam-keep):not(.extraMesButtons):not(.extraMesButtonsHint):not(.mes_edit_buttons) {
     display: none !important;
 }
 
@@ -158,12 +159,6 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
     margin-top: calc(var(--mam-sp) * 1.5);
 }
 
-/* 그룹 제목 */
-.mam-head {
-    font-weight: var(--mam-strong);
-    margin: 0 0 var(--mam-sp);
-}
-
 /* 접이식 박스: 접히면 제목 + 안내 문구만 남김 */
 .mam-toggle {
     cursor: pointer;
@@ -210,43 +205,6 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
 .mam-item:last-of-type,
 .mam-item:last-child {
     padding-bottom: 0;
-}
-
-/* 제목 오른쪽에 버튼이 붙는 줄 */
-.mam-head-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: calc(var(--mam-sp) * 3);
-}
-
-.mam-head-btns {
-    display: flex;
-    align-items: center;
-    gap: var(--mam-sp);
-    flex: 0 0 auto;
-}
-
-/* 아이콘 버튼 (Show All / Hide All / Clean Up / Save / Reset) — 폰에서 누르기 쉽게 조금 넉넉하게 */
-.mam-btn {
-    flex: 0 0 auto;
-    margin: 0;
-    padding: calc(var(--mam-sp) * 1.5) calc(var(--mam-sp) * 2);
-    background: none;
-    border: 0;
-    color: inherit;
-    opacity: 0.6;
-    cursor: pointer;
-}
-
-.mam-btn:hover {
-    opacity: 1;
-}
-
-.mam-btn:focus-visible {
-    opacity: 1;
-    outline: 1px solid var(--mam-accent);
-    outline-offset: 1px;
 }
 
 /* 옵션 한 줄: 이름은 왼쪽, 토글은 맨 오른쪽 */
@@ -346,10 +304,6 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
     border-radius: var(--radius-md, 0.375rem);
     outline: 1px dashed var(--mam-line);
     outline-offset: -1px;
-}
-
-.mam-pv:empty {
-    outline-color: var(--mam-line);
 }
 
 .mam-pv-item {
@@ -452,6 +406,11 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
     opacity: 0.45;
 }
 
+/* 지금 챗에는 없지만 최근에 본 버튼 */
+.mam-row.mam-absent .mam-icon {
+    opacity: 0.6;
+}
+
 .mam-placeholder {
     height: 36px;
     margin-bottom: var(--mam-sp);
@@ -492,16 +451,6 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
 .mam-name small {
     display: block;
     opacity: 0.55;
-}
-
-.mam-del {
-    cursor: pointer;
-    opacity: 0.6;
-    padding: calc(var(--mam-sp) * 2) calc(var(--mam-sp) * 1.5);
-}
-
-.mam-del:hover {
-    opacity: 1;
 }
 
 /* ===== 최상단 버튼줄 (Show All / Hide All / Clean Up / Save / Reset) ===== */

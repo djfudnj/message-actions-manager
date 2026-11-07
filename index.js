@@ -7,9 +7,19 @@
     'use strict';
 
     const MODULE = 'message_actions_manager';
+    const TITLE = 'Message Actions Manager';
+    const SCHEMA_VERSION = 2;
+    // 저장되는 버튼 종류의 상한 — 다른 확장이 메시지마다 다른 id/title을 쓰더라도 설정 파일이 끝없이 커지지 않게 한다
+    const MAX_KNOWN = 300;
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    // 이 기간 동안 한 번도 감지되지 않은 버튼만 '미감지'(Clean Up 대상)로 본다.
+    // (마지막 메시지에만/특정 챗에서만 나타나는 조건부 버튼을 오탐하지 않기 위함)
+    const STALE_MS = 14 * DAY_MS;
+
     // sets: { 대표키: [멤버키...] } — 같은 자리를 번갈아 쓰는 버튼 묶음. 그룹 목록/숨김 목록에는 대표키만 들어간다.
     // saved: Save 버튼으로 저장한 배치 { g1, g2, hidden, sets } (없으면 null). Reset 시 이 상태로 복원.
-    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {}, noShadow: true, scrollActions: true, moreRight: true, editExtract: {}, saved: null };
+    // known[key]: { label, html, seen }  (seen = 마지막으로 감지된 시각, ms)
+    const DEFAULTS = { g1: [], g2: [], hidden: [], known: {}, native: [], sets: {}, noShadow: true, scrollActions: true, moreRight: true, editExtract: {}, saved: null, version: 0 };
 
     // 항상 세트로 묶여 있는 쌍 (사용자가 풀 수 없음)
     const DEFAULT_SETS = [
@@ -22,11 +32,21 @@
         'mes_button', 'interactable', 'list-group-item', 'hidden', 'displayNone',
         'menu_button', 'right_menu_button',
     ]);
+    const FA_GENERIC = new Set(['fa-solid', 'fa-regular', 'fa-brands', 'fa-fw']);
 
     const liveKeys = new Set();
     let uiDirty = false;
-    let dormantNotified = false;
+    let capWarned = false;
     const ctx = () => SillyTavern.getContext();
+
+    function supported() {
+        try {
+            const c = ctx();
+            return !!(c && c.extensionSettings && typeof c.saveSettingsDebounced === 'function');
+        } catch {
+            return false;
+        }
+    }
 
     function settings() {
         const { extensionSettings } = ctx();
@@ -35,36 +55,36 @@
         for (const k of Object.keys(DEFAULTS)) {
             if (s[k] === undefined) s[k] = structuredClone(DEFAULTS[k]);
         }
-        // v1.0 -> v1.1 마이그레이션
-        if (Array.isArray(s.order)) {
-            if (!s.g1.length && !s.g2.length) s.g1 = s.order.filter((k) => s.known[k]);
-            delete s.order;
-        }
         // 어느 그룹에도 없는 버튼은 그룹1로 (저장 이후 새로 설치된 확장의 버튼도 여기서 그룹1 맨 뒤로 들어감)
         const placed = new Set([...s.g1, ...s.g2, ...nonLeaderMembers(s)]);
         for (const k of Object.keys(s.known)) if (!placed.has(k)) s.g1.push(k);
-        // 직전 버전의 단일 옵션(extractEdit) -> 버튼별 옵션(editExtract)
-        if (s.extractEdit !== undefined) {
-            if (s.extractEdit && !Object.keys(s.editExtract).length) {
-                s.editExtract = { mes_edit_copy: true, mes_edit_delete: true };
-            } else {
-                for (const k of ['mes_ext_edit_copy', 'mes_ext_edit_delete']) removeKey(s, k);
-            }
-            delete s.extractEdit;
-        }
-        // 예전 버전의 '묶음 풀기' 기록은 더 이상 쓰지 않음
-        if (s.ignored !== undefined) delete s.ignored;
         return s;
+    }
+
+    // 설정 스키마 업그레이드 (시작할 때 한 번만)
+    function migrate() {
+        const s = settings();
+        if (s.version >= SCHEMA_VERSION) return;
+        // 옛 개발 버전의 잔여 필드 정리
+        delete s.order;
+        delete s.extractEdit;
+        delete s.ignored;
+        for (const k of ['mes_ext_edit_copy', 'mes_ext_edit_delete']) removeKey(s, k);
+        // 감지 시각이 없던 기록은 '지금 본 것'으로 시작 → 14일 뒤부터 미감지 대상이 됨
+        const now = Date.now();
+        for (const rec of Object.values(s.known)) if (!rec.seen) rec.seen = now;
+        s.version = SCHEMA_VERSION;
+        save();
     }
 
     const save = () => ctx().saveSettingsDebounced();
 
-    // 메시지 액션 아이콘의 그림자 일괄 해제 여부 (body 클래스로 CSS 토글)
+    // 메시지 액션 아이콘의 그림자 일괄 해제 여부
     const applyShadowSetting = () => {
         document.body.classList.toggle('mam-no-shadow', !!settings().noShadow);
     };
 
-    // 아이콘이 너무 많을 때: 기본은 다음 줄로 넘김, 켜면 가로 스크롤
+    // 켜면 가로 스크롤
     const applyScrollSetting = () => {
         document.body.classList.toggle('mam-scroll', !!settings().scrollActions);
     };
@@ -89,7 +109,7 @@
     };
     const extKeyOf = (nk) => 'mes_x_' + nk.replace(/^mes_/, ''); // mes_edit_copy -> mes_x_edit_copy
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const busyMes = new WeakSet();
+    let busy = false; // 편집 모드 흉내 작업은 한 번에 하나만 (ST의 편집 상태와 아래 quiet 상태가 전역이라서)
     const isEditing = (mes) => !!mes.querySelector('.edit_textarea');
 
     // 이 ST 버전에만 있는 편집 버튼(알려진 목록 밖)도 DOM에서 찾아 목록에 추가
@@ -98,41 +118,34 @@
             const classes = [...el.classList];
             const nk = classes.find((c) => c.startsWith('mes_edit_') && !EDIT_SKIP.has(c));
             if (!nk || EDIT_DEFS[nk]) continue;
-            const icon = classes.find((c) => c.startsWith('fa-') && !['fa-solid', 'fa-regular', 'fa-brands', 'fa-fw'].includes(c)) || 'fa-circle';
+            const icon = classes.find((c) => c.startsWith('fa-') && !FA_GENERIC.has(c)) || 'fa-circle';
             EDIT_DEFS[nk] = { icon, title: el.getAttribute('title') || nk };
         }
     }
 
-    // 챗 안에 남은 편집 모드를 확실히 닫는다: 취소 → (안 닫히면) 확인 순으로 재시도하며 실제로 닫혔는지 검사.
-    // 이동 직후엔 메시지 번호/요소가 바뀌므로 매번 챗에서 편집창을 새로 찾는다.
     const editingMes = () => document.querySelector('#chat .edit_textarea')?.closest('.mes') || null;
 
     async function exitEditMode() {
-        for (let round = 0; round < 2; round++) {
-            for (let i = 0; i < 12; i++) {
-                const m = editingMes();
-                if (!m) break;
-                // 앞 몇 번은 취소(변경 없음), 계속 안 닫히면 확인(내용 그대로 저장)으로 폴백
-                m.querySelector(i < 4 ? '.mes_edit_cancel' : '.mes_edit_done')?.click();
-                await sleep(150);
-            }
-            if (!editingMes()) {
-                await sleep(400); // ST가 뒤늦게 편집 상태를 되살리는 경우 대비해 한 번 더 확인
+        for (let i = 0; i < 16; i++) {
+            const m = editingMes();
+            if (!m) {
+                await sleep(300); // ST가 뒤늦게 편집 상태를 되살리는 경우 대비해 한 번 더 확인
                 if (!editingMes()) return true;
+                continue;
             }
+            m.querySelector('.mes_edit_cancel')?.click();
+            await sleep(150);
         }
-        toastr.warning('Could not close edit mode automatically.', 'Message Actions Manager');
+        toastr.warning('Could not close edit mode automatically. Please close it manually.', TITLE);
         return false;
     }
 
-    // 위/아래 이동: ST가 메시지 번호를 바꾸고 저장을 끝낼 때까지 대기
+    // 위/아래 이동: ST가 메시지 번호를 바꾸고 저장을 끝낼 때까지 대기 (여기서부터 약간 동작상 귀찮지만 눈으로는 편안한짓 함)
     async function waitMoveDone(mes, idBefore) {
         for (let i = 0; i < 30 && mes.getAttribute('mesid') === idBefore; i++) await sleep(50);
         await sleep(500);
     }
 
-    // 'quiet' 버튼(위/아래 이동): 내부적으로 편집 모드를 거치는 동안 편집창이 화면에 보이지 않게 한다.
-    // 편집 진입 전의 본문을 복사해 둔 '화면용 사본'을 대신 보여주고(진짜 본문은 숨김), 끝나면 사본을 지운다.
     let quietHtml = null;
     let quietCls = '';
 
@@ -143,7 +156,6 @@
         document.body.classList.add('mam-quiet-edit'); // 편집창/편집 버튼 숨김 (CSS)
     }
 
-    // 편집창이 생긴 직후: 그 본문 영역을 숨기고 같은 자리에 사본을 둔다 (같은 작업 안에서 처리 → 깜빡임 없음)
     function quietCover(mes) {
         const real = mes.querySelector('.edit_textarea')?.closest('.mes_text');
         if (!real || quietHtml === null) return;
@@ -163,35 +175,48 @@
         quietHtml = null;
     }
 
-    // 삭제는 편집 모드 없이도 가능: ST의 /cut 슬래시 명령을 직접 쓴다 (확인 팝업은 직접 띄움).
-    // 처리했으면 true, 쓸 수 없는 환경이면 false(→ 편집 모드 경유 방식으로 폴백)
-    async function deleteMessageDirect(mes) {
+    const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    // 확인 팝업 (ST 팝업 사용, 없으면 브라우저 confirm). 기본 선택은 항상 취소.
+    async function askConfirm(title, detail, okText) {
+        const { callGenericPopup, POPUP_TYPE, POPUP_RESULT } = ctx();
+        if (!callGenericPopup || !POPUP_TYPE) return window.confirm(detail ? `${title}\n${detail}` : title);
+        const r = await callGenericPopup(
+            `<h3>${esc(title)}</h3><div style="white-space:pre-wrap">${esc(detail || '')}</div>`,
+            POPUP_TYPE.CONFIRM,
+            '',
+            { okButton: okText, cancelButton: 'Cancel', defaultResult: POPUP_RESULT?.NEGATIVE ?? 0 },
+        );
+        return POPUP_RESULT ? r === POPUP_RESULT.AFFIRMATIVE : r === true;
+    }
+
+    // 응답 생성 중(중지 버튼이 보이는 동안)에는 메시지 배열을 건드리지 않는다
+    function isGenerating() {
+        const stop = document.getElementById('mes_stop');
+        return !!stop && getComputedStyle(stop).display !== 'none';
+    }
+
+    async function deleteMessage(mes) {
         const id = Number(mes.getAttribute('mesid'));
-        const { callGenericPopup, POPUP_TYPE, POPUP_RESULT, executeSlashCommandsWithOptions } = ctx();
-        if (!Number.isInteger(id) || !executeSlashCommandsWithOptions) return false;
-        let ok;
-        if (callGenericPopup && POPUP_TYPE) {
-            const r = await callGenericPopup(`<h3>Delete this message?</h3><div>#${id}</div>`, POPUP_TYPE.CONFIRM, '', {
-                okButton: 'Delete',
-                cancelButton: 'Cancel',
-                defaultResult: POPUP_RESULT?.NEGATIVE ?? 0, // Enter 기본값은 Cancel
-            });
-            ok = POPUP_RESULT ? r === POPUP_RESULT.AFFIRMATIVE : r === true;
-        } else {
-            ok = window.confirm('Delete this message?');
+        const { executeSlashCommandsWithOptions } = ctx();
+        if (!Number.isInteger(id) || !executeSlashCommandsWithOptions) {
+            toastr.error('Deleting from here needs a newer SillyTavern.', TITLE);
+            return;
         }
-        if (!ok) return true;
-        // 팝업 도중 채팅이 바뀌었거나 인덱스가 밀렸으면 중단
-        if (!mes.isConnected || Number(mes.getAttribute('mesid')) !== id) return true;
+        if (!(await askConfirm('Delete this message?', `#${id}`, 'Delete'))) return;
+        if (!mes.isConnected || Number(mes.getAttribute('mesid')) !== id) return;
         await executeSlashCommandsWithOptions(`/cut ${id}`);
-        return true;
     }
 
     async function runEditAction(mes, nk) {
-        if (busyMes.has(mes)) return;
-        busyMes.add(mes);
+        if (busy) return;
+        if (isGenerating()) { toastr.warning('Wait for the reply to finish generating.', TITLE); return; }
+        const other = editingMes();
+        if (other && other !== mes) { toastr.warning('Finish editing the other message first.', TITLE); return; }
+
+        busy = true;
         try {
-            if (nk === 'mes_edit_delete' && await deleteMessageDirect(mes)) return;
+            if (nk === 'mes_edit_delete') { await deleteMessage(mes); return; }
             const def = EDIT_DEFS[nk] || {};
             const wasEditing = isEditing(mes);
             const quiet = !!def.quiet && !wasEditing;
@@ -199,12 +224,12 @@
             if (!wasEditing) {
                 mes.querySelector('.mes_edit')?.click();
                 for (let i = 0; i < 100 && !isEditing(mes); i++) await sleep(10);
-                if (!isEditing(mes)) { toastr.error('Could not enter edit mode.', 'Message Actions Manager'); return; }
+                if (!isEditing(mes)) { toastr.error('Could not enter edit mode.', TITLE); return; }
                 if (quiet) quietCover(mes);
             }
             const btn = mes.querySelector('.' + nk);
             if (!btn) {
-                toastr.error('Original edit button not found.', 'Message Actions Manager');
+                toastr.error('Original edit button not found.', TITLE);
                 if (!wasEditing) mes.querySelector('.mes_edit_cancel')?.click();
                 return;
             }
@@ -215,11 +240,11 @@
             for (let i = 0; i < 600 && document.querySelector('dialog.popup[open]'); i++) await sleep(100);
             if (nk === 'mes_edit_up' || nk === 'mes_edit_down') await waitMoveDone(mes, idBefore);
             else await sleep(150);
-            // 우리가 연 편집 모드가 남아 있으면(삭제 취소, 복제/이동 후 등) 원래 상태로 되돌림
+            // 우리가 연 편집 모드가 남아 있으면(복제/이동 후 등) 취소로 원래 상태로 되돌림
             if (!wasEditing && !def.keepEditing) await exitEditMode();
         } finally {
             quietEnd();
-            busyMes.delete(mes);
+            busy = false;
         }
     }
 
@@ -345,9 +370,11 @@
         return !!s.sets[k] || nonLeaderMembers(s).has(k);
     }
 
-    // 이번 세션에서 실제 DOM에서 발견된 버튼인가? (삭제/비활성화된 확장의 버튼은 false)
-    function isLive(s, k) {
-        return (s.sets[k] || [k]).some((m) => liveKeys.has(m));
+    // 이번 세션에 감지됐거나, 최근(STALE_MS 이내)에 감지된 적이 있는 버튼인가?
+    // (조건부 버튼이 현재 챗에 없다고 목록에서 사라지지 않도록)
+    const isRecent = (s, k) => !!s.known[k] && Date.now() - (s.known[k].seen || 0) < STALE_MS;
+    function isShown(s, k) {
+        return (s.sets[k] || [k]).some((m) => liveKeys.has(m) || isRecent(s, m));
     }
 
     // 화면(프리뷰/목록)에 안 보이는 키(숨김·미감지)를 새 순서 목록에 원래 자리 근처로 다시 끼워 넣는다.
@@ -385,23 +412,9 @@
         return structuredClone({ g1: s.g1, g2: s.g2, hidden: s.hidden, sets: s.sets });
     }
 
-    // 감지되지 않은(삭제/비활성화된 확장) 버튼 키 목록 — Clean Up 대상과 동일한 기준
+    // 오랫동안 감지되지 않은(삭제/비활성화된 확장) 버튼 키 목록 — Clean Up 대상
     function staleKeys(s) {
-        return Object.keys(s.known).filter((k) => !liveKeys.has(k) && !isInSet(s, k));
-    }
-
-    // 감지 안 된 버튼이 있으면 Clean Up 하라고 한 번(세션당) 알려줌
-    function notifyDormant() {
-        if (dormantNotified) return;
-        const s = settings();
-        const n = staleKeys(s).length;
-        if (!n) return;
-        dormantNotified = true;
-        toastr.warning(
-            `${n} icon(s) from removed/disabled extensions were not detected. Open Message Actions Manager and press 'Clean Up' to tidy the list.`,
-            'Message Actions Manager',
-            { timeOut: 10000, extendedTimeOut: 5000 },
-        );
+        return Object.keys(s.known).filter((k) => !isInSet(s, k) && !isShown(s, k));
     }
 
     /* ---------- 버튼 탐색 / 식별 ---------- */
@@ -442,28 +455,57 @@
             (c) => !IGNORE_CLASSES.has(c) && !c.startsWith('fa-') && !c.startsWith('mam-'),
         );
         if (own) return own;
-        const icon = classes.find((c) => c.startsWith('fa-') && !['fa-solid', 'fa-regular', 'fa-brands', 'fa-fw'].includes(c));
+        const icon = classes.find((c) => c.startsWith('fa-') && !FA_GENERIC.has(c));
         if (icon) return 'icon:' + icon;
-        if (el.id) return 'id:' + el.id;
-        return 'title:' + (el.getAttribute('title') || el.textContent.trim());
+        // id/title은 메시지마다 달라질 수 있으므로(번호, 시각 등) 숫자를 뭉개서 키가 무한히 늘지 않게 한다
+        if (el.id) return 'id:' + el.id.replace(/\d+/g, '#');
+        return 'title:' + (el.getAttribute('title') || el.textContent.trim()).replace(/\d+/g, '#');
+    }
+
+    // 같은 키라도 아이콘/제목/data-* 가 다르면 서로 다른 버튼으로 본다
+    // (한 확장이 같은 클래스로 여러 버튼을 만들어도 중복으로 오인해 숨기지 않도록)
+    function sigOf(el, key) {
+        const icon = [...el.classList].find((c) => c.startsWith('fa-') && !FA_GENERIC.has(c)) || '';
+        let data = '';
+        for (const a of el.attributes) if (a.name.startsWith('data-')) data += `${a.name}=${a.value};`;
+        return `${key}|${icon}|${el.getAttribute('title') || ''}|${data}`;
     }
 
     const getLabel = (el, key) => el.getAttribute('title') || el.getAttribute('data-title') || key;
 
+    const dompurify = () => (SillyTavern.libs && SillyTavern.libs.DOMPurify) || null;
+
+    // DOMPurify가 없을 때: 자식 없이 class/title만 가진 안전한 껍데기
+    function minimalHtml(el) {
+        const c = document.createElement('div');
+        c.className = [...el.classList].filter((x) => !x.startsWith('mam-') && x !== 'displayNone' && x !== 'hidden').join(' ');
+        const t = el.getAttribute('title');
+        if (t) c.title = t;
+        return c.outerHTML;
+    }
+
+    // 설정에 저장할 아이콘 HTML (다른 확장의 DOM이므로 반드시 sanitize)
     function snapshot(el) {
         const c = el.cloneNode(true);
-        c.classList.remove('mam-hidden', 'mam-dup', 'displayNone', 'hidden');
+        c.classList.remove('mam-hidden', 'mam-dup', 'mam-keep', 'displayNone', 'hidden');
         c.removeAttribute('style');
         c.removeAttribute('id');
         c.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
-        for (const node of [c, ...c.querySelectorAll('*')]) {
-            for (const a of [...node.attributes]) {
-                if (/^on/i.test(a.name)) node.removeAttribute(a.name);
-            }
+        const DP = dompurify();
+        return DP ? DP.sanitize(c.outerHTML) : minimalHtml(el);
+    }
+
+    // 저장된 HTML을 화면에 넣을 때도 한 번 더 sanitize (settings.json이 변조/공유돼도 안전하도록). 결과는 캐시.
+    const cleanCache = new Map();
+    function iconHtml(html) {
+        if (!html) return '';
+        let out = cleanCache.get(html);
+        if (out === undefined) {
+            const DP = dompurify();
+            out = DP ? DP.sanitize(html) : '';
+            cleanCache.set(html, out);
         }
-        const html = c.outerHTML;
-        const DP = SillyTavern.libs && SillyTavern.libs.DOMPurify;
-        return DP ? DP.sanitize(html) : html;
+        return out;
     }
 
     // 템플릿(원래 DOM 순서) 기준으로 새 버튼을 이웃 버튼 옆에 끼워 넣는다.
@@ -513,25 +555,38 @@
     function register(els) {
         const s = settings();
         let changed = false;
+        const now = Date.now();
         for (const el of els) {
             const key = getKey(el);
-            if (!liveKeys.has(key)) { liveKeys.add(key); uiDirty = true; }
-            if (!s.known[key]) {
-                s.known[key] = { label: getLabel(el, key), html: snapshot(el) };
+            const firstLive = !liveKeys.has(key);
+            if (firstLive) { liveKeys.add(key); uiDirty = true; }
+            const rec = s.known[key];
+            if (!rec) {
+                if (capWarned) continue; // 상한 도달: 기록은 안 하지만 버튼은 그대로 보임(그룹1 맨 뒤)
+                if (Object.keys(s.known).length >= MAX_KNOWN) {
+                    capWarned = true;
+                    console.warn(`[${TITLE}] Too many distinct icons (>${MAX_KNOWN}); new ones are shown but not recorded.`);
+                    continue;
+                }
+                s.known[key] = { label: getLabel(el, key), html: snapshot(el), seen: now };
                 placeKey(s, key); // 새 버튼은 원래 순서 위치의 그룹1/2 이웃 옆으로
                 refreshedKeys.add(key);
                 changed = true;
-            } else if (!refreshedKeys.has(key)) {
-                // 이미 저장된 버튼도, 지금 실제로 보이는 아이콘으로 한 번 갱신
-                // (다른 확장이 아이콘을 바꿨을 때 설정 화면에 옛 아이콘이 남는 문제 방지)
-                refreshedKeys.add(key);
-                const html = snapshot(el);
-                const label = getLabel(el, key);
-                if (s.known[key].html !== html || s.known[key].label !== label) {
-                    s.known[key].html = html;
-                    s.known[key].label = label;
-                    uiDirty = true;
-                    changed = true;
+            } else {
+                // 감지 시각은 하루에 한 번만 갱신 (저장 반복 방지)
+                if (firstLive && now - (rec.seen || 0) > DAY_MS) { rec.seen = now; changed = true; }
+                if (!refreshedKeys.has(key)) {
+                    // 이미 저장된 버튼도, 지금 실제로 보이는 아이콘으로 한 번 갱신
+                    // (다른 확장이 아이콘을 바꿨을 때 설정 화면에 옛 아이콘이 남는 문제 방지)
+                    refreshedKeys.add(key);
+                    const html = snapshot(el);
+                    const label = getLabel(el, key);
+                    if (rec.html !== html || rec.label !== label) {
+                        rec.html = html;
+                        rec.label = label;
+                        uiDirty = true;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -564,6 +619,7 @@
         toggle.className = 'mes_button mam-more-toggle fa-solid fa-ellipsis interactable';
         toggle.title = 'More';
         toggle.tabIndex = 0;
+        toggle.setAttribute('role', 'button');
         mb.prepend(g1, toggle, g2); // … 버튼과 펼쳐진 그룹2 모두 맨 오른쪽에 위치
         mb.classList.add('mam-ready');
         return { g1, g2, toggle };
@@ -581,12 +637,16 @@
             const k = getKey(b);
             b.classList.toggle('mam-hidden', hiddenSet.has(leaders.get(k) ?? k));
             // 다른 확장이 같은 버튼을 두 번 넣은 경우(템플릿 복제 + 직접 추가 등): 첫 번째만 남기고 숨김
-            const fallback = /^(icon|id|title):/.test(k);
-            const sig = fallback ? k + '|' + (b.getAttribute('title') || b.getAttribute('data-title') || '') : k;
+            const sig = sigOf(b, k);
             b.classList.toggle('mam-dup', seen.has(sig));
             seen.add(sig);
             if (!byKey.has(k)) byKey.set(k, []);
             byKey.get(k).push(b);
+        }
+
+        // 아이콘이 아닌 직계 자식(카운터 등 다른 확장의 요소)은 숨기지 않고 제자리에 둔다
+        for (const c of mb.children) {
+            if (!c.classList.contains('mes_button') && !c.matches(NOT_BUTTON)) c.classList.add('mam-keep');
         }
 
         const take = (keys) => {
@@ -643,7 +703,26 @@
         queueMicrotask(() => { raf = 0; flush(); });
     }
 
+    let failures = 0;
+
+    // 문제가 생기면 이 확장이 건 숨김 규칙을 풀어서 ST 기본 버튼이 그대로 보이게 되돌린다
+    function rollback() {
+        observer.disconnect();
+        document.querySelectorAll('.mes_buttons.mam-ready').forEach((el) => el.classList.remove('mam-ready'));
+    }
+
+    function fail(err, where) {
+        console.error(`[${TITLE}] ${where} failed`, err);
+        if (++failures < 3) return;
+        rollback();
+        toastr.error('Too many errors; switched off for this session. See the browser console.', TITLE);
+    }
+
     function flush() {
+        try { flushInner(); } catch (err) { fail(err, 'flush'); }
+    }
+
+    function flushInner() {
         const nodes = [...pending];
         pending.clear();
 
@@ -674,13 +753,23 @@
 
         const hidden = new Set(s.hidden);
         const leaders = leaderMapOf(s);
-        nodes.forEach((n) => applyTo(n, s, hidden, leaders));
+        let ok = true;
+        for (const n of nodes) {
+            try {
+                applyTo(n, s, hidden, leaders);
+            } catch (err) {
+                ok = false;
+                n.querySelector('.mes_buttons')?.classList.remove('mam-ready'); // 이 메시지는 ST 기본 표시로 되돌림
+                fail(err, 'applyTo');
+            }
+        }
 
         if (changed) save();
         if (changed || uiDirty) {
             uiDirty = false;
             renderManager();
         }
+        if (ok) failures = 0;
     }
 
     // 이 확장이 관심 있는 변화: 새 .mes 추가, 메시지 헤더(.mes_buttons 등) 변경, 템플릿 변경.
@@ -716,7 +805,7 @@
                     <div class="mam-toolbar">
                         <div class="menu_button menu_button_icon interactable" id="mam_show_all" role="button" tabindex="0" title="Show all icons"><i class="fa-solid fa-eye"></i><span>Show All</span></div>
                         <div class="menu_button menu_button_icon interactable" id="mam_hide_all" role="button" tabindex="0" title="Hide all icons"><i class="fa-solid fa-eye-slash"></i><span>Hide All</span></div>
-                        <div class="menu_button menu_button_icon interactable" id="mam_cleanup" role="button" tabindex="0" title="Remove entries no longer detected (e.g. icons from uninstalled extensions)"><i class="fa-solid fa-broom"></i><span>Clean Up</span></div>
+                        <div class="menu_button menu_button_icon interactable" id="mam_cleanup" role="button" tabindex="0" title="Remove records of icons not seen for 14+ days (e.g. from uninstalled extensions)"><i class="fa-solid fa-broom"></i><span>Clean Up</span></div>
                         <div class="menu_button menu_button_icon interactable" id="mam_save" role="button" tabindex="0" title="Save the current layout. Reset will return to this layout."><i class="fa-solid fa-floppy-disk"></i><span>Save</span></div>
                         <div class="menu_button menu_button_icon interactable" id="mam_reset" role="button" tabindex="0" title="Reset to the saved layout (or the default)"><i class="fa-solid fa-rotate-left"></i><span>Reset</span></div>
                     </div>
@@ -747,7 +836,7 @@
                     </fieldset>
 
                     <fieldset class="mam-box mam-collapsible mam-collapsed">
-                        <legend class="mam-toggle" tabindex="0" role="button" aria-expanded="false"><i class="fa-solid fa-pen-to-square"></i>Show Edit Buttons<i class="fa-solid fa-chevron-right mam-chevron"></i></legend>
+                        <legend class="mam-toggle" tabindex="0" role="button" aria-expanded="false"><i class="fa-solid fa-pen-to-square"></i>Show Edit Buttons (Experimental)<i class="fa-solid fa-chevron-right mam-chevron"></i></legend>
                         <div class="mam-item">
                             <small class="mam-desc">Show buttons from the Edit menu as their own message icons.</small>
                         </div>
@@ -841,13 +930,14 @@
             renderManager();
         });
 
-        $('#mam_cleanup').on('click', () => {
+        $('#mam_cleanup').on('click', async () => {
             const s = settings();
             const stale = staleKeys(s);
-            if (!stale.length) { toastr.info('No undetected items.'); return; }
+            if (!stale.length) { toastr.info('Nothing to clean up. Only icons not seen for 14+ days are removed.'); return; }
             const names = stale.map((k) => s.known[k].label || k).join(', ');
-            if (!confirm(`Remove ${stale.length} undetected item(s) from the list?\n${names}\n\n(They'll be detected again if the extension is reinstalled.)`)) return;
+            if (!(await askConfirm(`Remove ${stale.length} icon record(s)?`, `${names}\n\n(They are detected again if the extension comes back.)`, 'Remove'))) return;
             stale.forEach((k) => removeKey(s, k));
+            capWarned = false;
             save();
             applyAll();
             renderManager();
@@ -860,12 +950,12 @@
             save();
             renderManager();
             toastr.success('Layout saved. Reset will return to this layout.');
-            notifyDormant();
         });
 
-        // 저장본이 있으면 저장 상태로, 없으면 실리태번 기본 순서로 복원
-        $('#mam_reset').on('click', () => {
+        // 저장본이 있으면 저장 상태로, 없으면 실리태번 기본 순서로 복원 (현재 배치가 사라지므로 확인)
+        $('#mam_reset').on('click', async () => {
             const s = settings();
+            if (!(await askConfirm('Reset layout?', s.saved ? 'Return to the saved layout.' : 'Return to the default layout.', 'Reset'))) return;
             if (s.saved) {
                 s.g1 = [...s.saved.g1];
                 s.g2 = [...s.saved.g2];
@@ -884,7 +974,6 @@
             applyAll();
             renderManager();
             toastr.info(s.saved ? 'Restored the saved layout.' : 'Restored the default layout.');
-            notifyDormant();
         });
 
         renderManager();
@@ -899,12 +988,12 @@
 
         const fill = (pv, keys) => {
             for (const key of keys) {
-                if (!s.known[key] || hidden.has(key) || !isLive(s, key)) continue;
+                if (!s.known[key] || hidden.has(key) || !isShown(s, key)) continue;
                 pv.append(
                     $('<span class="mam-pv-item">')
                         .attr('data-key', key)
                         .attr('title', (s.sets[key] || [key]).map((m) => (s.known[m] ? s.known[m].label : m)).join(' / '))
-                        .append($('<span>').html(s.known[key].html)),
+                        .append($('<span>').html(iconHtml(s.known[key].html))),
                 );
             }
         };
@@ -1002,7 +1091,6 @@
                 if (st.caret) st.caret.remove();
                 st.el.classList.remove('mam-drag-src');
             }
-            box.classList.remove('mam-dragging');
             document.documentElement.classList.remove('mam-grabbing');
             st = null;
         };
@@ -1029,7 +1117,6 @@
             st.caret = caret;
             st.dragging = true;
             st.el.classList.add('mam-drag-src');
-            box.classList.add('mam-dragging');
             document.documentElement.classList.add('mam-grabbing');
             document.addEventListener('scroll', onScroll, true);
         };
@@ -1097,7 +1184,7 @@
         const hidden = new Set(s.hidden);
         const read = (sel) => $(`${sel} .mam-pv-item`).map((_, el) => $(el).attr('data-key')).get();
 
-        const keep = (k) => hidden.has(k) || !isLive(s, k);
+        const keep = (k) => hidden.has(k) || !isShown(s, k);
 
         const oldG1 = [...s.g1];
         const oldG2 = [...s.g2];
@@ -1112,7 +1199,7 @@
     function commitOrder() {
         const s = settings();
         const rows = (sel) => $(`${sel} .mam-row`).map((_, el) => $(el).attr('data-key')).get();
-        const dormant = (k) => !isLive(s, k);
+        const dormant = (k) => !isShown(s, k);
         s.g1 = mergeKeep(s.g1, rows('#mam_g1'), dormant);
         s.g2 = mergeKeep(s.g2, rows('#mam_g2'), dormant);
         save();
@@ -1126,16 +1213,18 @@
 
         const st0 = sArg || settings();
         const members = st0.sets[key];
+        // 지금 챗에는 없지만 최근에 본 버튼(조건부 버튼 등)은 살짝 흐리게 표시
+        if (!(members || [key]).some((m) => liveKeys.has(m))) row.addClass('mam-absent').attr('title', 'Not present in the current chat');
 
         const handle = $('<i class="fa-solid fa-grip-vertical mam-handle"></i>');
         const icon = $('<span class="mam-icon">');
         const name = $('<span class="mam-name">');
         if (members) {
-            icon.addClass('mam-icon-set').html(members.map((m) => (st0.known[m] ? st0.known[m].html : '')).join(''));
+            icon.addClass('mam-icon-set').html(members.map((m) => (st0.known[m] ? iconHtml(st0.known[m].html) : '')).join(''));
             name.append($('<span>').text(members.map((m) => (st0.known[m] ? st0.known[m].label : m)).join(' / ')));
             name.append($('<small>').text(members.join(' + ')));
         } else {
-            icon.html(info.html);
+            icon.html(iconHtml(info.html));
             name.append($('<span>').text(info.label));
             name.append($('<small>').text(key));
         }
@@ -1177,15 +1266,15 @@
         for (const [sel, keys] of [['#mam_g1', s.g1], ['#mam_g2', s.g2]]) {
             const list = $(sel).empty();
             for (const key of keys) {
-                if (s.known[key] && isLive(s, key)) list.append(makeRow(key, s.known[key], hidden, s));
+                if (s.known[key] && isShown(s, key)) list.append(makeRow(key, s.known[key], hidden, s));
             }
         }
 
         // 삭제·비활성화된 확장의 버튼은 목록에서 자동으로 숨김 (기록은 유지 → 다시 켜면 원래 자리로 복귀)
-        const dormant = [...s.g1, ...s.g2].filter((k) => s.known[k] && !isLive(s, k));
+        const dormant = [...s.g1, ...s.g2].filter((k) => s.known[k] && !isShown(s, k));
         $('#mam_dormant')
             .toggle(dormant.length > 0)
-            .text(`${dormant.length} undetected item(s) (uninstalled/disabled extensions) hidden. They return to their original spot when the extension is re-enabled. Use 'Clean Up' to delete their records.`);
+            .text(`${dormant.length} icon(s) have not been seen for 14+ days and are hidden here. They reappear in their original spot if the extension comes back. Use 'Clean Up' to delete their records.`);
 
         if ($.fn.sortable) {
             $('#mam_g1, #mam_g2').sortable({
@@ -1200,8 +1289,8 @@
 
     /* ---------- 시작 ---------- */
 
-    jQuery(() => {
-        settings();
+    function init() {
+        migrate();
         applyShadowSetting();
         applyScrollSetting();
         applyMoreSetting();
@@ -1219,9 +1308,13 @@
             runExt(this);
         });
 
-        // 헤더의 … 버튼: 그룹2 펼치기/접기
-        $(document).on('click', '.mam-more-toggle', function () {
-            $(this).closest('.mes_buttons').addClass('mam-more-open');
+        // 헤더의 … 버튼: 그룹2 펼치기 (클릭 / Enter / Space)
+        const openMore = (el) => $(el).closest('.mes_buttons').addClass('mam-more-open');
+        $(document).on('click', '.mam-more-toggle', function () { openMore(this); });
+        $(document).on('keydown', '.mam-more-toggle', function (e) {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            e.preventDefault();
+            openMore(this);
         });
 
         // 메시지 액션 영역 밖을 클릭하면 펼친 그룹2를 다시 닫기
@@ -1238,8 +1331,19 @@
 
         document.querySelectorAll('#chat .mes').forEach((m) => pending.add(m));
         flush();
+    }
 
-        // 다른 확장의 버튼이 다 올라온 뒤에 감지 여부를 확인해 Clean Up 안내 (세션당 1회)
-        setTimeout(notifyDormant, 6000);
+    jQuery(() => {
+        if (!supported()) {
+            console.warn(`[${TITLE}] This SillyTavern version is not supported. The extension stays idle and changes nothing.`);
+            return;
+        }
+        try {
+            init();
+        } catch (err) {
+            console.error(`[${TITLE}] failed to start`, err);
+            rollback();
+            toastr.error('Failed to start. Message icons were left as they are. See the browser console.', TITLE);
+        }
     });
 })();
