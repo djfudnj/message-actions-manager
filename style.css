@@ -26,7 +26,7 @@
 }
 
 /* 기본: 넘치면 다음 줄로 */
-.mes_buttons:has(> .mam-group1) {
+.mes_buttons.mam-ready {
     flex-wrap: wrap !important;
     height: auto !important;
     max-height: none !important;
@@ -38,27 +38,26 @@
 
 /* 옵션 켬: 한 줄 유지 + 가로 스크롤 (손가락/휠로 밀기)
    safe: 넘칠 때는 오른쪽 정렬이 아니라 왼쪽부터 시작해서 앞쪽 아이콘이 잘리지 않게 한다 */
-body.mam-scroll .mes_buttons:has(> .mam-group1) {
+body.mam-scroll .mes_buttons.mam-ready {
     flex-wrap: nowrap !important;
     overflow-x: auto !important;
     overflow-y: hidden !important;
     justify-content: flex-end !important;
     justify-content: safe flex-end !important;
     scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
 }
 
-body.mam-scroll .mes_buttons:has(> .mam-group1)::-webkit-scrollbar {
+body.mam-scroll .mes_buttons.mam-ready::-webkit-scrollbar {
     display: none;
 }
 
-.mes.mam-more-open .mes_buttons .mam-group2 {
+.mes_buttons.mam-more-open .mam-group2 {
     display: contents;
 }
 
 /* 펼쳐지면 … 버튼은 사라지고, 펼쳐진 아이콘이 그 자리(맨 오른쪽)에 온다 */
-.mes.mam-more-open .mes_buttons .mam-more-toggle {
+.mes_buttons.mam-more-open .mam-more-toggle {
     display: none !important;
 }
 
@@ -70,7 +69,7 @@ body.mam-scroll .mes_buttons:has(> .mam-group1)::-webkit-scrollbar {
    정리(mam-dup 처리)되기 전 한 프레임 동안 중복 아이콘이 깜빡이며 보인다.
    그룹 구성이 끝난 메시지에서 그룹 밖에 있는 버튼은 정리되기 전까지 숨긴다.
    (진짜 새 버튼은 정리 시 그룹 안으로 옮겨지므로 그때부터 정상 표시됨) */
-.mes_buttons:has(> .mam-group1) > *:not(.mam-group):not(.mam-more-toggle):not(.extraMesButtons):not(.extraMesButtonsHint):not(.mes_edit_buttons) {
+.mes_buttons.mam-ready > *:not(.mam-group):not(.mam-more-toggle):not(.extraMesButtons):not(.extraMesButtonsHint):not(.mes_edit_buttons) {
     display: none !important;
 }
 
@@ -291,7 +290,7 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
     overflow: hidden;
     border-radius: 9999px;
     background: var(--mam-track-off);
-    transition: all 0.3s;
+    transition: background 0.3s;
 }
 
 .mam-slider::after {
@@ -304,7 +303,7 @@ body.mam-no-shadow .mes_buttons .mam-more-toggle::after {
     border-radius: 9999px;
     background: var(--mam-thumb);
     transform: translateY(-50%);
-    transition: all 0.3s;
+    transition: transform 0.3s;
 }
 
 .mam-switch input:checked + .mam-slider {

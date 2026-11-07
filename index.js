@@ -234,6 +234,8 @@
 
     // 켜진 버튼만 각 메시지에 삽입 / 꺼진 버튼은 제거
     function syncExtButtons(mb, g1, s) {
+        // 켜진 옵션이 없고 남은 버튼도 없으면 할 일 없음 (메시지마다 querySelector 5번 하는 것 방지)
+        if (!Object.values(s.editExtract).some(Boolean) && !mb.querySelector('.mam-x')) return;
         for (const [nk, def] of Object.entries(EDIT_DEFS)) {
             const exist = mb.querySelector(`.${extKeyOf(nk)}`);
             const on = !!s.editExtract[nk];
@@ -281,6 +283,13 @@
     function leaderOf(s, k) {
         for (const l of Object.keys(s.sets)) if (s.sets[l].includes(k)) return l;
         return k;
+    }
+
+    // 멤버키 -> 대표키 맵 (flush/applyAll마다 한 번만 만들어 재사용)
+    function leaderMapOf(s) {
+        const map = new Map();
+        for (const l of Object.keys(s.sets)) for (const m of s.sets[l]) if (!map.has(m)) map.set(m, l);
+        return map;
     }
 
     function nonLeaderMembers(s) {
@@ -399,18 +408,21 @@
 
     // 액션 아이콘 후보: 표준 .mes_button + 'mes_button' 클래스 없이 직접 만든 아이콘(예: mes_feedback)도 포함.
     // 후자는 .extraMesButtons 안이나 .mes_buttons 바로 아래에 들어간다.
+    // (.mes_buttons 안에서만 탐색하므로 ':scope' 기준. 메시지 본문 DOM을 훑지 않는다)
     const CANDIDATES = [
-        '.mes_buttons .mes_button',
-        '.mes_buttons .extraMesButtons > *',
-        '.mes_buttons > *',
-        '.mes_buttons .mam-group > *',
+        '.mes_button',
+        ':scope > *',
+        ':scope > .extraMesButtons > *',
+        ':scope > .mam-group > *',
     ].join(',');
     const NOT_BUTTON = '.extraMesButtons, .extraMesButtonsHint, .mes_edit_buttons, .mam-group, .mam-more-toggle';
 
     function getButtons(root) {
         if (!root) return [];
+        const mb = root.matches && root.matches('.mes_buttons') ? root : root.querySelector('.mes_buttons');
+        if (!mb) return [];
         const out = [];
-        for (const el of root.querySelectorAll(CANDIDATES)) {
+        for (const el of mb.querySelectorAll(CANDIDATES)) {
             if (el.matches(NOT_BUTTON) || el.closest('.mes_edit_buttons')) continue;
             if (!el.classList.contains('mes_button')) {
                 // 아이콘처럼 보이는 것만 (fa-* 클래스 또는 title 보유)
@@ -537,6 +549,7 @@
     function ensureGroups(mb) {
         let g1 = mb.querySelector(':scope > .mam-group1');
         if (g1) {
+            mb.classList.add('mam-ready');
             return {
                 g1,
                 g2: mb.querySelector(':scope > .mam-group2'),
@@ -552,10 +565,11 @@
         toggle.title = 'More';
         toggle.tabIndex = 0;
         mb.prepend(g1, toggle, g2); // … 버튼과 펼쳐진 그룹2 모두 맨 오른쪽에 위치
+        mb.classList.add('mam-ready');
         return { g1, g2, toggle };
     }
 
-    function applyTo(mes, s, hiddenSet) {
+    function applyTo(mes, s, hiddenSet, leaders = leaderMapOf(s)) {
         const mb = mes.querySelector('.mes_buttons');
         if (!mb) return;
         const { g1, g2, toggle } = ensureGroups(mb);
@@ -565,7 +579,7 @@
         const seen = new Set();
         for (const b of getButtons(mes)) {
             const k = getKey(b);
-            b.classList.toggle('mam-hidden', hiddenSet.has(leaderOf(s, k)));
+            b.classList.toggle('mam-hidden', hiddenSet.has(leaders.get(k) ?? k));
             // 다른 확장이 같은 버튼을 두 번 넣은 경우(템플릿 복제 + 직접 추가 등): 첫 번째만 남기고 숨김
             const fallback = /^(icon|id|title):/.test(k);
             const sig = fallback ? k + '|' + (b.getAttribute('title') || b.getAttribute('data-title') || '') : k;
@@ -594,13 +608,14 @@
 
         const any2 = d2.some((b) => !b.classList.contains('mam-hidden') && !b.classList.contains('mam-dup'));
         toggle.classList.toggle('mam-hidden', !any2);
-        if (!any2) mes.classList.remove('mam-more-open');
+        if (!any2) mb.classList.remove('mam-more-open');
     }
 
     function applyAll() {
         const s = settings();
         const hidden = new Set(s.hidden);
-        document.querySelectorAll('#chat .mes').forEach((mes) => applyTo(mes, s, hidden));
+        const leaders = leaderMapOf(s);
+        document.querySelectorAll('#chat .mes').forEach((mes) => applyTo(mes, s, hidden, leaders));
     }
 
     /* ---------- 변경 감시 ---------- */
@@ -611,9 +626,20 @@
     // rAF로 미루면 브라우저가 한 번 화면을 그린 뒤에야 정리되어, 다른 확장이 끼워 넣은
     // 중복 아이콘이 한 프레임 보이는 깜빡임이 생긴다. 마이크로태스크는 페인트 전에 실행되므로
     // 변경 직후, 화면에 그려지기 전에 바로 정리한다.
+    // 다른 확장의 MutationObserver와 서로 mutation을 주고받으면 마이크로태스크가 끝없이 이어져
+    // 페인트가 막힐 수 있으므로, 같은 태스크 안에서 연속 20회를 넘으면 rAF로 한 번 쉬어 간다.
+    let streak = 0;
+    let streakTimer = 0;
+    let tplDirty = true; // 템플릿(#message_template)은 바뀌었을 때만 다시 읽는다
+
     function schedule() {
         if (raf) return;
         raf = 1;
+        if (!streakTimer) streakTimer = setTimeout(() => { streakTimer = 0; streak = 0; });
+        if (++streak > 20) {
+            requestAnimationFrame(() => { raf = 0; flush(); });
+            return;
+        }
         queueMicrotask(() => { raf = 0; flush(); });
     }
 
@@ -624,24 +650,31 @@
         const s0 = settings();
         let changed = false;
 
-        // 원본 순서 수집: 템플릿과, 아직 재배치되지 않은 메시지의 DOM 순서
-        const tplEl = document.getElementById('message_template');
-        if (tplEl) changed = mergeNative(s0, getButtons(tplEl).map(getKey)) || changed;
-        for (const n of nodes) {
-            const mb = n.querySelector('.mes_buttons');
-            if (mb && !mb.querySelector(':scope > .mam-group1')) {
-                changed = mergeNative(s0, getButtons(n).map(getKey)) || changed;
-            }
+        // 원본 순서 수집: 템플릿(변경됐을 때만)과, 아직 재배치되지 않은 메시지의 DOM 순서
+        if (tplDirty) {
+            tplDirty = false;
+            const tplEl = document.getElementById('message_template');
+            const tplButtons = getButtons(tplEl);
+            if (tplEl) changed = mergeNative(s0, tplButtons.map(getKey)) || changed;
+            changed = register(tplButtons) || changed;
         }
 
-        changed = register(getButtons(tplEl)) || changed;
-        for (const n of nodes) changed = register(getButtons(n)) || changed;
+        // 노드당 getButtons는 한 번만
+        const found = nodes.map((n) => [n, getButtons(n)]);
+        for (const [n, btns] of found) {
+            const mb = n.querySelector('.mes_buttons');
+            if (mb && !mb.querySelector(':scope > .mam-group1')) {
+                changed = mergeNative(s0, btns.map(getKey)) || changed;
+            }
+        }
+        for (const [, btns] of found) changed = register(btns) || changed;
 
-        const s = settings();
+        const s = changed ? settings() : s0;
         if (seedSets(s)) changed = true;
 
         const hidden = new Set(s.hidden);
-        nodes.forEach((n) => applyTo(n, s, hidden));
+        const leaders = leaderMapOf(s);
+        nodes.forEach((n) => applyTo(n, s, hidden, leaders));
 
         if (changed) save();
         if (changed || uiDirty) {
@@ -650,19 +683,23 @@
         }
     }
 
+    // 이 확장이 관심 있는 변화: 새 .mes 추가, 메시지 헤더(.mes_buttons 등) 변경, 템플릿 변경.
+    // 스트리밍 중 .mes_text가 계속 바뀌는 것은 무시한다.
     const observer = new MutationObserver((mutations) => {
         for (const m of mutations) {
             const t = m.target;
             if (!(t instanceof Element)) continue;
+            if (t.closest('.mes_text')) continue;
+            if (t.id === 'message_template' || t.closest('#message_template')) { tplDirty = true; continue; }
+            if (t.id === 'chat') {
+                m.addedNodes.forEach((n) => { if (n.nodeType === 1 && n.matches('.mes')) pending.add(n); });
+                continue;
+            }
             const mes = t.closest('#chat .mes');
             if (mes) pending.add(mes);
-            m.addedNodes.forEach((n) => {
-                if (n.nodeType !== 1) return;
-                if (n.matches('.mes')) pending.add(n);
-                else n.querySelectorAll('.mes').forEach((x) => pending.add(x));
-            });
+            m.addedNodes.forEach((n) => { if (n.nodeType === 1 && n.matches('.mes')) pending.add(n); });
         }
-        schedule();
+        if (pending.size || tplDirty) schedule();
     });
 
     /* ---------- 설정 UI ---------- */
@@ -887,37 +924,49 @@
         return Math.hypot(dx, dy);
     }
 
-    function pvDropTarget(x, y, dragEl) {
+    // 드래그 시작 시 한 번만 레이아웃을 읽어 캐시 (드래그 중엔 DOM이 안 바뀌므로 안전)
+    function cacheDragRects(box, dragEl) {
+        return {
+            box: box.getBoundingClientRect(),
+            zones: [...box.querySelectorAll('.mam-pv')].map((z) => ({
+                z,
+                r: z.getBoundingClientRect(),
+                items: [...z.querySelectorAll('.mam-pv-item')]
+                    .filter((i) => i !== dragEl)
+                    .map((i) => ({ el: i, r: i.getBoundingClientRect() })),
+            })),
+        };
+    }
+
+    // 캐시된 rect만 사용 (레이아웃 읽기 없음)
+    function pvDropTarget(x, y, cache) {
         let zone = null;
         let zd = Infinity;
-        for (const z of document.querySelectorAll('#mam_preview .mam-pv')) {
-            const d = rectDist(z.getBoundingClientRect(), x, y);
+        for (const z of cache.zones) {
+            const d = rectDist(z.r, x, y);
             if (d < zd) { zd = d; zone = z; }
         }
         if (!zone) return null;
 
         let ref = null;
         let rd = Infinity;
-        for (const it of zone.querySelectorAll('.mam-pv-item')) {
-            if (it === dragEl) continue;
-            const d = rectDist(it.getBoundingClientRect(), x, y);
+        for (const it of zone.items) {
+            const d = rectDist(it.r, x, y);
             if (d < rd) { rd = d; ref = it; }
         }
-        if (!ref) return { zone, ref: null, after: false };
-        const r = ref.getBoundingClientRect();
-        return { zone, ref, after: x > r.left + r.width / 2 };
+        if (!ref) return { zone: zone.z, zoneRect: zone.r, ref: null, refRect: null, after: false };
+        return { zone: zone.z, zoneRect: zone.r, ref: ref.el, refRect: ref.r, after: x > ref.r.left + ref.r.width / 2 };
     }
 
-    function placeCaret(box, caret, t) {
-        const b = box.getBoundingClientRect();
+    function placeCaret(caret, b, t) {
         let left, top, height;
         if (t.ref) {
-            const r = t.ref.getBoundingClientRect();
+            const r = t.refRect;
             left = t.after ? r.right : r.left - 2; // 아이콘 사이 gap(2px)에 맞춤
             top = r.top;
             height = r.height;
         } else {
-            const r = t.zone.getBoundingClientRect();
+            const r = t.zoneRect;
             height = 28;
             left = r.left + 4;
             top = r.top + (r.height - height) / 2;
@@ -933,11 +982,21 @@
         const keysOf = (sel) => [...box.querySelectorAll(`${sel} .mam-pv-item`)].map((el) => el.dataset.key);
         const snap = () => JSON.stringify([keysOf('#mam_pv1'), keysOf('#mam_pv2')]);
         let st = null;
+        let rafId = 0;
+
+        // 스크롤되면 캐시한 rect가 어긋나므로 표시만 해 두고 다음 프레임에 한 번 다시 읽는다
+        const getRects = () => {
+            if (!st.rects || st.stale) { st.rects = cacheDragRects(box, st.el); st.stale = false; }
+            return st.rects;
+        };
+        const onScroll = () => { if (st) st.stale = true; };
 
         const cleanup = () => {
             document.removeEventListener('pointermove', onMove);
             document.removeEventListener('pointerup', onUp);
             document.removeEventListener('pointercancel', onCancel);
+            document.removeEventListener('scroll', onScroll, true);
+            if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
             if (st) {
                 if (st.ghost) st.ghost.remove();
                 if (st.caret) st.caret.remove();
@@ -953,6 +1012,7 @@
             st.offX = st.sx - rect.left;
             st.offY = st.sy - rect.top;
             st.before = snap();
+            st.rects = cacheDragRects(box, st.el); // ghost/caret을 붙이기 전에 읽기
 
             const ghost = st.el.cloneNode(true);
             ghost.classList.remove('mam-pv-item');
@@ -971,6 +1031,17 @@
             st.el.classList.add('mam-drag-src');
             box.classList.add('mam-dragging');
             document.documentElement.classList.add('mam-grabbing');
+            document.addEventListener('scroll', onScroll, true);
+        };
+
+        // 프레임당 한 번만: 읽기(캐시 갱신이 필요할 때만) → 쓰기 순서
+        const tick = () => {
+            rafId = 0;
+            if (!st || !st.dragging) return;
+            const rects = getRects();
+            st.ghost.style.transform = `translate(${st.px - st.offX}px, ${st.py - st.offY}px)`;
+            st.target = pvDropTarget(st.px, st.py, rects);
+            if (st.target) placeCaret(st.caret, rects.box, st.target);
         };
 
         function onMove(e) {
@@ -979,21 +1050,24 @@
                 if (Math.hypot(e.clientX - st.sx, e.clientY - st.sy) < 4) return;
                 startDrag();
             }
-            st.ghost.style.transform = `translate(${e.clientX - st.offX}px, ${e.clientY - st.offY}px)`;
-            st.target = pvDropTarget(e.clientX, e.clientY, st.el);
-            if (st.target) placeCaret(box, st.caret, st.target);
+            st.px = e.clientX;
+            st.py = e.clientY;
+            if (!rafId) rafId = requestAnimationFrame(tick);
         }
 
         function onUp(e) {
             if (!st || e.pointerId !== st.id) return;
-            const { el, dragging, target, before } = st;
+            const { el, dragging, before } = st;
             let changed = false;
-            if (dragging && target && el.isConnected) {
-                const { zone, ref, after } = target;
-                if (!ref) zone.appendChild(el);
-                else if (after) ref.after(el);
-                else ref.before(el);
-                changed = snap() !== before;
+            if (dragging && el.isConnected) {
+                const target = pvDropTarget(e.clientX, e.clientY, getRects());
+                if (target) {
+                    const { zone, ref, after } = target;
+                    if (!ref) zone.appendChild(el);
+                    else if (after) ref.after(el);
+                    else ref.before(el);
+                    changed = snap() !== before;
+                }
             }
             cleanup();
             if (changed) commitPreview();
@@ -1010,7 +1084,7 @@
             const el = e.target.closest ? e.target.closest('.mam-pv-item') : null;
             if (!el) return;
             e.preventDefault();
-            st = { el, id: e.pointerId, sx: e.clientX, sy: e.clientY, dragging: false, ghost: null, caret: null, target: null };
+            st = { el, id: e.pointerId, sx: e.clientX, sy: e.clientY, px: e.clientX, py: e.clientY, dragging: false, ghost: null, caret: null, target: null, rects: null, stale: false };
             document.addEventListener('pointermove', onMove);
             document.addEventListener('pointerup', onUp);
             document.addEventListener('pointercancel', onCancel);
@@ -1046,11 +1120,11 @@
         renderPreview();
     }
 
-    function makeRow(key, info, hidden) {
+    function makeRow(key, info, hidden, sArg) {
         const row = $('<div class="mam-row">').attr('data-key', key);
         row.toggleClass('mam-off', hidden.has(key));
 
-        const st0 = settings();
+        const st0 = sArg || settings();
         const members = st0.sets[key];
 
         const handle = $('<i class="fa-solid fa-grip-vertical mam-handle"></i>');
@@ -1103,7 +1177,7 @@
         for (const [sel, keys] of [['#mam_g1', s.g1], ['#mam_g2', s.g2]]) {
             const list = $(sel).empty();
             for (const key of keys) {
-                if (s.known[key] && isLive(s, key)) list.append(makeRow(key, s.known[key], hidden));
+                if (s.known[key] && isLive(s, key)) list.append(makeRow(key, s.known[key], hidden, s));
             }
         }
 
@@ -1147,15 +1221,13 @@
 
         // 헤더의 … 버튼: 그룹2 펼치기/접기
         $(document).on('click', '.mam-more-toggle', function () {
-            $(this).closest('.mes').addClass('mam-more-open');
+            $(this).closest('.mes_buttons').addClass('mam-more-open');
         });
 
         // 메시지 액션 영역 밖을 클릭하면 펼친 그룹2를 다시 닫기
         $(document).on('click', (e) => {
-            $('#chat .mes.mam-more-open').each(function () {
-                if (!$(e.target).closest('.mes_buttons', this).length) {
-                    $(this).removeClass('mam-more-open');
-                }
+            $('#chat .mes_buttons.mam-more-open').each(function () {
+                if (!this.contains(e.target)) this.classList.remove('mam-more-open');
             });
         });
 
