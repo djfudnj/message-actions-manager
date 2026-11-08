@@ -95,9 +95,9 @@
      * (keepEditing: 편집 모드가 계속 필요한 버튼은 취소하지 않음)
      */
     const EDIT_DEFS = {
-        mes_edit_copy: { icon: 'fa-clone', title: 'Copy this message' },
+        mes_edit_copy: { icon: 'fa-clone', title: 'Copy this message', quiet: true },
         mes_edit_add_reasoning: { icon: 'fa-lightbulb', title: 'Add reasoning block', keepEditing: true },
-        mes_edit_delete: { icon: 'fa-trash-can', title: 'Delete this message' },
+        mes_edit_delete: { icon: 'fa-trash-can', title: 'Delete this message', quiet: true },
         mes_edit_up: { icon: 'fa-chevron-up', title: 'Move message up', quiet: true },
         mes_edit_down: { icon: 'fa-chevron-down', title: 'Move message down', quiet: true },
     };
@@ -178,18 +178,6 @@
         return !!stop && getComputedStyle(stop).display !== 'none';
     }
 
-    async function deleteMessage(mes) {
-        const id = Number(mes.getAttribute('mesid'));
-        const { executeSlashCommandsWithOptions } = ctx();
-        if (!Number.isInteger(id) || !executeSlashCommandsWithOptions) {
-            toastr.error('Deleting from here needs a newer SillyTavern.', TITLE);
-            return;
-        }
-        if (!(await askConfirm('Delete this message?', `#${id}`, 'Delete'))) return;
-        if (!mes.isConnected || Number(mes.getAttribute('mesid')) !== id) return;
-        await executeSlashCommandsWithOptions(`/cut ${id}`);
-    }
-
     async function runEditAction(mes, nk) {
         if (busy) return;
         if (isGenerating()) { toastr.warning('Wait for the reply to finish generating.', TITLE); return; }
@@ -198,7 +186,6 @@
 
         busy = true;
         try {
-            if (nk === 'mes_edit_delete') { await deleteMessage(mes); return; }
             const def = EDIT_DEFS[nk] || {};
             const wasEditing = isEditing(mes);
             const quiet = !!def.quiet && !wasEditing;
