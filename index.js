@@ -9,6 +9,7 @@
     const MODULE = 'message_actions_manager';
     const TITLE = 'Message Actions Manager';
     const SCHEMA_VERSION = 3;
+    const MAX_KNOWN = 300; // 메시지마다 클래스명이 달라지는 확장이 있어도 설정이 무한히 불어나지 않게 하는 상한
 
     // saved: Save 버튼으로 저장한 배치 { g1, g2, hidden } (없으면 null). Reset 시 이 상태로 복원.
     // known[key]: { label, html }
@@ -33,6 +34,7 @@
 
     const liveKeys = new Set(); // 이번 세션에 실제로 감지된 버튼
     let uiDirty = false;
+    let capWarned = false;
     const ctx = () => SillyTavern.getContext();
 
     function settings() {
@@ -66,13 +68,13 @@
             for (const k of ['mes_ext_edit_copy', 'mes_ext_edit_delete']) removeKey(s, k);
         }
         // v3: 범용 sets 저장 → 고정 PAIRS. 대표키가 달랐던 기록은 새 대표키로 바꿔 준다
-        const fix = (a) => [...new Set(a.map(leaderOf))];
+        const fix = (a) => [...new Set((a || []).map(leaderOf))];
         s.g1 = fix(s.g1);
         s.g2 = fix(s.g2);
         s.hidden = fix(s.hidden);
         if (s.saved) s.saved = { g1: fix(s.saved.g1), g2: fix(s.saved.g2), hidden: fix(s.saved.hidden) };
         delete s.sets;
-        for (const rec of Object.values(s.known)) delete rec.seen;
+        for (const rec of Object.values(s.known)) if (rec) delete rec.seen;
         settings(); // sets가 사라진 상태에서 미배치 버튼 정리
         s.version = SCHEMA_VERSION;
         save();
@@ -417,6 +419,12 @@
             if (!liveKeys.has(key)) { liveKeys.add(key); uiDirty = true; }
             const rec = s.known[key];
             if (!rec) {
+                if (capWarned) continue; // 상한 도달: 기록은 안 하지만 버튼은 그대로 보임(그룹1 맨 뒤)
+                if (Object.keys(s.known).length >= MAX_KNOWN) {
+                    capWarned = true;
+                    console.warn(`[${TITLE}] Too many distinct icons (>${MAX_KNOWN}); new ones are shown but not recorded.`);
+                    continue;
+                }
                 s.known[key] = { label: getLabel(el, key), html: snapshot(el) };
                 placeKey(s, key);
                 refreshedKeys.add(key);
@@ -744,6 +752,7 @@
             const names = stale.map((k) => s.known[k].label || k).join(', ');
             if (!(await askConfirm(`Remove ${stale.length} icon record(s)?`, `${names}\n\n(They are detected again if they show up in a chat.)`, 'Remove'))) return;
             stale.forEach((k) => removeKey(s, k));
+            capWarned = false;
             save();
             applyAll();
             renderManager();
