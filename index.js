@@ -95,15 +95,15 @@
      * (keepEditing: 편집 모드가 계속 필요한 버튼은 취소하지 않음)
      */
     const EDIT_DEFS = {
-        mes_edit_copy: { icon: 'fa-clone', title: 'Copy this message', quiet: true },
+        mes_edit_copy: { icon: 'fa-clone', title: 'Copy this message' },
         mes_edit_add_reasoning: { icon: 'fa-lightbulb', title: 'Add reasoning block', keepEditing: true },
-        mes_edit_delete: { icon: 'fa-trash-can', title: 'Delete this message', quiet: true },
-        mes_edit_up: { icon: 'fa-chevron-up', title: 'Move message up', quiet: true },
-        mes_edit_down: { icon: 'fa-chevron-down', title: 'Move message down', quiet: true },
+        mes_edit_delete: { icon: 'fa-trash-can', title: 'Delete this message' },
+        mes_edit_up: { icon: 'fa-chevron-up', title: 'Move message up' },
+        mes_edit_down: { icon: 'fa-chevron-down', title: 'Move message down' },
     };
     const extKeyOf = (nk) => 'mes_x_' + nk.replace(/^mes_/, ''); // mes_edit_copy -> mes_x_edit_copy
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    let busy = false; // 편집 모드 흉내 작업은 한 번에 하나만 (ST의 편집 상태와 아래 quiet 상태가 전역이라서)
+    let busy = false; // 편집 모드 흉내 작업은 한 번에 하나만 (ST의 편집 상태와 quietEdit의 body 클래스가 전역이라서)
     const isEditing = (mes) => !!mes.querySelector('.edit_textarea');
 
     const editingMes = () => document.querySelector('#chat .edit_textarea')?.closest('.mes') || null;
@@ -129,33 +129,32 @@
         await sleep(500);
     }
 
-    let quietHtml = null;
-    let quietCls = '';
-
-    function quietStart(mes) {
+    // 편집 모드를 몰래 열고 닫는 동안 편집 UI가 번쩍이지 않게 가린다.
+    // 편집창/편집 버튼은 CSS(body.mam-quiet-edit)로 숨기고, 본문은 열기 전 HTML 사본으로 덮어 둔다.
+    // 사용: const q = quietEdit(mes) → 편집 모드가 열린 뒤 q.cover() → 끝나면 q.end()
+    function quietEdit(mes) {
         const mt = mes.querySelector('.mes_text');
-        quietHtml = mt ? mt.innerHTML : null;
-        quietCls = mt ? mt.className : '';
-        document.body.classList.add('mam-quiet-edit'); // 편집창/편집 버튼 숨김 (CSS)
-    }
-
-    function quietCover(mes) {
-        const real = mes.querySelector('.edit_textarea')?.closest('.mes_text');
-        if (!real || quietHtml === null) return;
-        const g = document.createElement('div');
-        g.className = quietCls + ' mam-ghost-text';
-        g.innerHTML = quietHtml;
-        g.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
-        g.querySelectorAll('video, audio, iframe, script').forEach((n) => n.remove());
-        real.after(g);
-        real.dataset.mamLock = '1';
-    }
-
-    function quietEnd() {
-        document.querySelectorAll('#chat .mam-ghost-text').forEach((g) => g.remove());
-        document.querySelectorAll('#chat .mes_text[data-mam-lock]').forEach((el) => delete el.dataset.mamLock);
-        document.body.classList.remove('mam-quiet-edit');
-        quietHtml = null;
+        const html = mt ? mt.innerHTML : null;
+        const cls = mt ? mt.className : '';
+        document.body.classList.add('mam-quiet-edit');
+        return {
+            cover() {
+                const real = mes.querySelector('.edit_textarea')?.closest('.mes_text');
+                if (!real || html === null) return;
+                const g = document.createElement('div');
+                g.className = cls + ' mam-ghost-text';
+                g.innerHTML = html;
+                g.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+                g.querySelectorAll('video, audio, iframe, script').forEach((n) => n.remove());
+                real.after(g);
+                real.dataset.mamLock = '1';
+            },
+            end() {
+                document.querySelectorAll('#chat .mam-ghost-text').forEach((g) => g.remove());
+                document.querySelectorAll('#chat .mes_text[data-mam-lock]').forEach((el) => delete el.dataset.mamLock);
+                document.body.classList.remove('mam-quiet-edit');
+            },
+        };
     }
 
     const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -185,16 +184,16 @@
         if (other && other !== mes) { toastr.warning('Finish editing the other message first.', TITLE); return; }
 
         busy = true;
+        let quiet = null;
         try {
             const def = EDIT_DEFS[nk] || {};
             const wasEditing = isEditing(mes);
-            const quiet = !!def.quiet && !wasEditing;
-            if (quiet) quietStart(mes);
+            if (!wasEditing && !def.keepEditing) quiet = quietEdit(mes);
             if (!wasEditing) {
                 mes.querySelector('.mes_edit')?.click();
                 for (let i = 0; i < 100 && !isEditing(mes); i++) await sleep(10);
                 if (!isEditing(mes)) { toastr.error('Could not enter edit mode.', TITLE); return; }
-                if (quiet) quietCover(mes);
+                quiet?.cover();
             }
             const btn = mes.querySelector('.' + nk);
             if (!btn) {
@@ -212,7 +211,7 @@
             // 우리가 연 편집 모드가 남아 있으면(복제/이동 후 등) 취소로 원래 상태로 되돌림
             if (!wasEditing && !def.keepEditing) await exitEditMode();
         } finally {
-            quietEnd();
+            quiet?.end();
             busy = false;
         }
     }
