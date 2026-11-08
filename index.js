@@ -323,6 +323,10 @@
     // '편집 메뉴에서 뺀 아이콘'으로 켜져 있는 키인가? (챗이 열려 있지 않아도 Clean Up 대상이 되지 않게)
     const extKeyOn = (s, k) => Object.keys(EDIT_DEFS).some((nk) => s.editExtract[nk] && extKeyOf(nk) === k);
 
+    // 이번 세션에서 실제로 감지된 버튼인가? (삭제/비활성화된 확장의 버튼은 false → 패널에서 숨김)
+    // 쌍은 멤버 중 하나라도 감지되면 true. 편집 메뉴에서 빼낸 아이콘은 켜져 있으면 항상 true.
+    const isLive = (s, k) => (PAIRS[k] || [k]).some((m) => liveKeys.has(m)) || extKeyOn(s, k);
+
     // 지금 챗에서 감지되지 않은 버튼 키 — Clean Up 대상 (삭제/비활성화된 확장의 버튼 등)
     function staleKeys(s) {
         return Object.keys(s.known).filter((k) => !isPaired(k) && !liveKeys.has(k) && !extKeyOn(s, k));
@@ -387,7 +391,7 @@
     // 설정에 저장할 아이콘 HTML (화면에 넣을 때 iconHtml에서 sanitize)
     function snapshot(el) {
         const c = el.cloneNode(true);
-        c.classList.remove('mam-hidden', 'mam-dup', 'displayNone', 'hidden');
+        c.classList.remove('mam-hidden', 'mam-dup', 'mam-keep', 'displayNone', 'hidden');
         c.removeAttribute('style');
         c.removeAttribute('id');
         c.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
@@ -497,6 +501,11 @@
             seen.add(sig);
             if (!byKey.has(k)) byKey.set(k, []);
             byKey.get(k).push(b);
+        }
+
+        // 아이콘이 아닌 직계 자식(카운터 등 다른 확장의 요소)은 숨기지 않고 제자리에 둔다
+        for (const c of mb.children) {
+            if (!c.classList.contains('mes_button') && !c.matches(NOT_BUTTON)) c.classList.add('mam-keep');
         }
 
         const take = (keys) => {
@@ -629,6 +638,8 @@
                         <div class="menu_button menu_button_icon interactable" id="mam_save" role="button" tabindex="0" title="Save the current layout. Reset will return to this layout."><i class="fa-solid fa-floppy-disk"></i><span>Save</span></div>
                         <div class="menu_button menu_button_icon interactable" id="mam_reset" role="button" tabindex="0" title="Reset to the saved layout (or the default)"><i class="fa-solid fa-rotate-left"></i><span>Reset</span></div>
                     </div>
+
+                    <small id="mam_dormant" class="mam-desc" style="display:none"></small>
 
                     <fieldset class="mam-box">
                         <legend><i class="fa-solid fa-grip"></i>Preview</legend>
@@ -793,7 +804,7 @@
 
         const fill = (pv, keys) => {
             for (const key of keys) {
-                if (!s.known[key] || hidden.has(key)) continue;
+                if (!s.known[key] || hidden.has(key) || !isLive(s, key)) continue;
                 pv.append(
                     $('<span class="mam-pv-item">')
                         .attr('data-key', key)
@@ -989,7 +1000,7 @@
         const hidden = new Set(s.hidden);
         const read = (sel) => $(`${sel} .mam-pv-item`).map((_, el) => $(el).attr('data-key')).get();
 
-        const keep = (k) => hidden.has(k) || !s.known[k];
+        const keep = (k) => hidden.has(k) || !isLive(s, k);
 
         const oldG1 = [...s.g1];
         const oldG2 = [...s.g2];
@@ -1004,9 +1015,9 @@
     function commitOrder() {
         const s = settings();
         const rows = (sel) => $(`${sel} .mam-row`).map((_, el) => $(el).attr('data-key')).get();
-        const unknown = (k) => !s.known[k];
-        s.g1 = mergeKeep(s.g1, rows('#mam_g1'), unknown);
-        s.g2 = mergeKeep(s.g2, rows('#mam_g2'), unknown);
+        const dormant = (k) => !isLive(s, k);
+        s.g1 = mergeKeep(s.g1, rows('#mam_g1'), dormant);
+        s.g2 = mergeKeep(s.g2, rows('#mam_g2'), dormant);
         save();
         applyAll();
         renderPreview();
@@ -1019,8 +1030,6 @@
         // 쌍(hide/unhide 등)이면 멤버 아이콘을 모두 표시
         const members = (PAIRS[key] || []).filter((m) => s.known[m]);
         const isSet = members.length > 1;
-        // 지금 챗에는 없는 버튼(조건부 버튼 등)은 살짝 흐리게 표시
-        if (!(PAIRS[key] || [key]).some((m) => liveKeys.has(m))) row.addClass('mam-absent').attr('title', 'Not present in the current chat');
 
         const handle = $('<i class="fa-solid fa-grip-vertical mam-handle"></i>');
         const icon = $('<span class="mam-icon">');
@@ -1070,9 +1079,15 @@
         for (const [sel, keys] of [['#mam_g1', s.g1], ['#mam_g2', s.g2]]) {
             const list = $(sel).empty();
             for (const key of keys) {
-                if (s.known[key]) list.append(makeRow(key, s.known[key], hidden, s));
+                if (s.known[key] && isLive(s, key)) list.append(makeRow(key, s.known[key], hidden, s));
             }
         }
+
+        // 삭제·비활성화된 확장의 버튼은 목록에서 자동으로 숨김 (기록은 유지 → 다시 켜면 원래 자리로 복귀)
+        const dormant = [...s.g1, ...s.g2].filter((k) => s.known[k] && !isLive(s, k));
+        $('#mam_dormant')
+            .toggle(dormant.length > 0)
+            .text(`${dormant.length} undetected item(s) (uninstalled/disabled extensions) hidden. They return to their original spot when the extension is re-enabled. Use 'Clean Up' to delete their records.`);
 
         if ($.fn.sortable) {
             $('#mam_g1, #mam_g2').sortable({
