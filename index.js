@@ -91,6 +91,22 @@
         cl.toggle('mam-more-left', !s.moreRight);
     }
 
+    // ST의 "Expand Message Actions" 옵션.
+    //  켜짐 → 이 확장의 그룹(그룹1 / … 더보기) 모드
+    //  꺼짐 → 테마 우선 모드: DOM 구조를 건드리지 않고 순서(CSS order)와 숨김 여부만 적용
+    function isExpandOn() {
+        const cb = document.getElementById('expand_message_actions');
+        if (cb) return cb.checked;
+        return !!ctx().powerUserSettings?.expand_message_actions;
+    }
+
+    // 버튼의 원래 소속: 'x' = .extraMesButtons 안, 'm' = .mes_buttons 바로 아래 (모드를 바꿀 때 제자리로 되돌리기 위함)
+    // dataset 대신 WeakMap을 쓰는 이유: sigOf/snapshot이 data-* 를 읽기 때문
+    const homeOf = new WeakMap();
+    function markHome(b) {
+        if (!homeOf.has(b)) homeOf.set(b, b.closest('.extraMesButtons') ? 'x' : 'm');
+    }
+
     /* ---------- 편집 메뉴(.mes_edit_buttons)의 버튼을 독립 아이콘으로 빼기 ----------
      * ST 원본 .mes_edit_* 핸들러는 '편집 중인 메시지'(this_edit_mes_id)를 전제로 동작한다.
      * 그래서 클릭하면 → 편집 모드 진입 → 원본 버튼 클릭(ST 확인 팝업 그대로) → 아직 편집 중이면 취소 로 처리한다.
@@ -224,6 +240,7 @@
         el.title = def.title;
         el.dataset.mamNative = nk;
         el.tabIndex = 0;
+        homeOf.set(el, 'x');
         return el;
     }
 
@@ -478,9 +495,69 @@
         return { g1, g2, toggle };
     }
 
+    // 그룹 모드에서 만든 래퍼/… 버튼을 걷어내고 버튼을 원래 컨테이너로 되돌린다
+    function ungroup(mb) {
+        const g1 = mb.querySelector(':scope > .mam-group1');
+        const g2 = mb.querySelector(':scope > .mam-group2');
+        if (g1 || g2) {
+            const extra = mb.querySelector(':scope > .extraMesButtons');
+            const anchor = mb.querySelector(':scope > .mes_edit_buttons');
+            for (const g of [g1, g2]) {
+                if (!g) continue;
+                for (const b of [...g.children]) {
+                    if (homeOf.get(b) === 'm' || !extra) mb.insertBefore(b, anchor);
+                    else extra.appendChild(b);
+                }
+                g.remove();
+            }
+        }
+        mb.querySelector(':scope > .mam-more-toggle')?.remove();
+        mb.classList.remove('mam-ready', 'mam-more-open');
+    }
+
+    // 테마 우선 모드: 그룹/래퍼 없이 순서(order)와 숨김만 적용
+    function applyPlain(mes, mb, s, hiddenSet) {
+        ungroup(mb);
+        mb.classList.add('mam-plain');
+        // 편집 메뉴에서 빼낸 아이콘도 테마 스킨이 먹도록 원래 더보기 컨테이너(.extraMesButtons)에 둔다
+        syncExtButtons(mb, mb.querySelector(':scope > .extraMesButtons') || mb, s);
+
+        // 순서: 그룹1 → 그룹2 순으로 이어 붙인 목록의 위치 (컨테이너가 달라도 상대 순서는 유지)
+        const order = new Map();
+        [...s.g1, ...s.g2].forEach((lead, i) => {
+            for (const k of PAIRS[lead] || [lead]) order.set(k, i + 1);
+        });
+
+        const seen = new Set();
+        let extraTotal = 0;
+        let extraHidden = 0;
+        for (const b of getButtons(mes)) {
+            markHome(b);
+            const k = getKey(b);
+            const hide = hiddenSet.has(leaderOf(k));
+            const sig = sigOf(b, k);
+            const dup = seen.has(sig);
+            seen.add(sig);
+            b.classList.toggle('mam-hidden', hide);
+            b.classList.toggle('mam-dup', dup);
+            const ord = String(order.get(k) ?? 9999);
+            if (b.style.order !== ord) b.style.order = ord;
+            if (b.closest('.extraMesButtons')) {
+                extraTotal++;
+                if (hide || dup) extraHidden++;
+            }
+        }
+        // 더보기 안의 버튼이 전부 숨겨졌으면 빈 메뉴를 열지 않도록 더보기(…) 힌트도 숨김
+        mb.querySelector(':scope > .extraMesButtonsHint')?.classList.toggle('mam-hidden', extraTotal > 0 && extraHidden === extraTotal);
+    }
+
     function applyTo(mes, s, hiddenSet) {
         const mb = mes.querySelector('.mes_buttons');
         if (!mb) return;
+        if (!isExpandOn()) { applyPlain(mes, mb, s, hiddenSet); return; }
+        mb.classList.remove('mam-plain');
+        mb.querySelector(':scope > .extraMesButtonsHint')?.classList.remove('mam-hidden');
+        for (const b of getButtons(mes)) markHome(b); // 그룹으로 옮기기 전에 원래 자리를 기록
         const { g1, g2, toggle } = ensureGroups(mb);
         syncExtButtons(mb, g1, s);
 
@@ -488,6 +565,7 @@
         const seen = new Set();
         for (const b of getButtons(mes)) {
             const k = getKey(b);
+            if (b.style.order) b.style.order = ''; // 테마 우선 모드에서 준 order 제거
             b.classList.toggle('mam-hidden', hiddenSet.has(leaderOf(k)));
             // 다른 확장이 같은 버튼을 두 번 넣은 경우(템플릿 복제 + 직접 추가 등): 첫 번째만 남기고 숨김
             const sig = sigOf(b, k);
@@ -559,6 +637,7 @@
     function rollback() {
         observer.disconnect();
         document.querySelectorAll('.mes_buttons.mam-ready').forEach((el) => el.classList.remove('mam-ready'));
+        document.querySelectorAll('.mes_buttons.mam-plain').forEach((el) => el.classList.remove('mam-plain'));
     }
 
     function flush() {
@@ -634,6 +713,8 @@
                     </div>
 
                     <small id="mam_dormant" class="mam-desc" style="display:none"></small>
+
+                    <small class="mam-desc" style="margin-bottom: calc(var(--mam-sp) * 2)">Expand Message Actions ON: icons are split into Group 1 / More (…).<br>OFF: your theme's own message action styling is kept, and only icon order and visibility are applied (groups are ignored).</small>
 
                     <fieldset class="mam-box">
                         <legend><i class="fa-solid fa-grip"></i>Preview</legend>
@@ -1113,6 +1194,10 @@
             e.preventDefault();
             runExt(this);
         });
+
+        // Expand Message Actions 옵션/테마가 바뀌면 모드를 다시 판정해서 전체 적용
+        $(document).on('change input', '#expand_message_actions', () => setTimeout(applyAll, 0));
+        $(document).on('change', '#themes', () => setTimeout(applyAll, 500)); // 테마 JSON이 이 옵션을 바꾸는 경우
 
         // 헤더의 … 버튼: 그룹2 펼치기 (클릭 / Enter / Space)
         const openMore = (el) => $(el).closest('.mes_buttons').addClass('mam-more-open');

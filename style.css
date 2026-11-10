@@ -503,3 +503,18 @@ body.mam-more-left .mes_buttons .mam-more-toggle {
 body.mam-more-left .mes_buttons .mam-group2 > * {
     order: -1;
 }
+
+/* ===== 테마 우선 모드 (ST의 Expand Message Actions 꺼짐) =====
+   이 모드에서는 버튼이 원래 컨테이너(.extraMesButtons 등)에 그대로 있다.
+   테마가 '#chat .mes .extraMesButtons .mes_button { display:flex !important }' 처럼 강하게 지정해도
+   숨김이 이기도록 specificity를 올린다. (.mam-more-toggle 등 그룹 모드 요소에도 같은 의미라 무해) */
+html body #chat .mes .mes_buttons .mes_button:is(.mam-hidden, .mam-dup),
+html body #chat .mes .mes_buttons .extraMesButtonsHint.mam-hidden {
+    display: none !important;
+}
+
+/* 일부 테마는 편집 중인 메시지의 .mes_buttons 를 :has() 로 숨긴다(specificity가 높아 위쪽 quiet-edit 규칙이 짐).
+   위/아래 이동 중 액션 줄이 깜빡이지 않도록 같은 조건에서 다시 이긴다. */
+body.mam-quiet-edit #chat .mes:has(.mes_edit_buttons[style*="flex"]) .mes_buttons {
+    display: flex !important;
+}
