@@ -714,7 +714,6 @@
 
                     <small id="mam_dormant" class="mam-desc" style="display:none"></small>
 
-                    <small class="mam-desc" style="margin-bottom: calc(var(--mam-sp) * 2)">Expand Message Actions ON: icons are split into Group 1 / More (…).<br>OFF: your theme's own message action styling is kept, and only icon order and visibility are applied (groups are ignored).</small>
 
                     <fieldset class="mam-box">
                         <legend><i class="fa-solid fa-grip"></i>Preview</legend>
@@ -725,17 +724,17 @@
                     </fieldset>
 
                     <fieldset class="mam-box">
-                        <legend><i class="fa-solid fa-thumbtack"></i>Always Display Group</legend>
+                        <legend><i class="fa-solid fa-thumbtack"></i>Main Group</legend>
                         <div class="mam-item">
-                            <small class="mam-desc">Icons always shown in the message header. Drag the handle to reorder.</small>
+                            <small class="mam-desc">Icons shown directly in the message header. Drag the handle to reorder.</small>
                             <div id="mam_g1" class="mam-list"></div>
                         </div>
                     </fieldset>
 
                     <fieldset class="mam-box">
-                        <legend><i class="fa-solid fa-ellipsis"></i>More Group</legend>
+                        <legend><i class="fa-solid fa-ellipsis"></i>More Plus Group</legend>
                         <div class="mam-item">
-                            <small class="mam-desc">Icons revealed by the … button. Drag the handle to move them between groups.</small>
+                            <small class="mam-desc">Icons revealed by the … button. Drag the handle to move them between groups (grouping applies only when Expand Message Actions is ON).</small>
                             <div id="mam_g2" class="mam-list"></div>
                         </div>
                     </fieldset>
@@ -767,12 +766,12 @@
                         </div>
                         <div class="mam-item">
                             <label class="mam-opt" for="mam_more_right">
-                                <span class="mam-opt-title">Show More group on the right</span>
+                                <span class="mam-opt-title">Show More Plus Group on the right</span>
                                 <span class="mam-switch"><input type="checkbox" id="mam_more_right"><span class="mam-slider"></span></span>
                             </label>
                             <small class="mam-desc">Turn off to show the … button and More icons on the left instead.</small>
                         </div>
-                        <small class="mam-desc mam-hint">Click to expand: shadows, icon overflow behavior, and More group position.</small>
+                        <small class="mam-desc mam-hint">Click to expand: shadows, icon overflow behavior, and More Plus Group position.</small>
                     </fieldset>
                 </div>
             </div>
